@@ -3,4 +3,5 @@ python-binance==1.0.19
 pandas==2.2.2
 numpy==1.26.4
 flask==3.0.3
+gunicorn==22.0.0  # <-- أضف هذا السطر
 

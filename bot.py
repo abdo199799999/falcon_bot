@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# bot.py - النسخة النهائية مع خدعة الـ Health Check المصححة لـ Render
+# bot.py - النسخة النهائية مع Gunicorn
 # -----------------------------------------------------------------------------
 
 import os
@@ -11,35 +11,24 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from binance.client import Client
 
-# --- إعداد خادم الويب البسيط (Health Check) ---
-# هذا الجزء سيجعل Render تعتقد أن الخدمة حية وتمنعها من التوقف.
+# --- إعداد Flask (يبقى كما هو) ---
+# Gunicorn سيجد هذا الكائن 'app' تلقائيًا
 app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    """هذه هي نقطة النهاية التي ستزورها Render (أو أنت) لإيقاظ الخدمة."""
-    return "Falcon Bot is alive and scanning!", 200
+    return "Falcon Bot is alive with Gunicorn!", 200
 
-def run_web_server():
-    """دالة لتشغيل خادم الويب في الخلفية."""
-    # Render تحدد المنفذ تلقائيًا عبر متغير بيئة PORT
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
-
-# --- إعدادات البوت (لا تتغير) ---
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+# --- إعدادات البوت (تبقى كما هي) ---
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
-
+# ... (باقي إعدادات ودوال الاستراتيجية لا تتغير) ...
 RSI_PERIOD = 14
 RSI_OVERSOLD = 30
 TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE
 SCAN_INTERVAL_SECONDS = 15 * 60
 
-# --- دوال الاستراتيجية والتحليل (لا تتغير) ---
 def calculate_rsi(df, period=14):
-    # استيراد المكتبات داخل الدالة لضمان التوافق في بيئات مختلفة
     import pandas as pd
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -58,22 +47,16 @@ def get_top_usdt_pairs(client, limit=100):
 
 def check_strategy(client, symbol):
     try:
-        # استيراد المكتبات داخل الدالة لضمان التوافق
         import pandas as pd
-        
         klines = client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=RSI_PERIOD + 50)
         if len(klines) < RSI_PERIOD + 2: return False
-        
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
         df['close'] = pd.to_numeric(df['close'])
         df['open'] = pd.to_numeric(df['open'])
         df['RSI'] = calculate_rsi(df, RSI_PERIOD)
-        
         last_candle, prev_candle = df.iloc[-1], df.iloc[-2]
-        
         rsi_is_oversold = last_candle['RSI'] < RSI_OVERSOLD
         is_bullish_engulfing = (last_candle['close'] > last_candle['open'] and prev_candle['close'] < prev_candle['open'] and last_candle['close'] > prev_candle['open'] and last_candle['open'] < prev_candle['close'])
-        
         if rsi_is_oversold and is_bullish_engulfing:
             logger.info(f"🎯 تم العثور على فرصة! العملة: {symbol}, RSI: {last_candle['RSI']:.2f}")
             return True
@@ -105,16 +88,9 @@ async def start(update, context):
     user = update.effective_user
     await update.message.reply_html(f"أهلاً بك يا {user.mention_html()}!\n\nأنا **بوت الصقر** وجاهز للعمل.")
 
-def main():
-    logger.info("--- بدء تشغيل البوت وخادم الويب ---")
-    
-    # تشغيل خادم الويب في ثريد منفصل حتى لا يوقف البوت
-    web_thread = Thread(target=run_web_server)
-    web_thread.daemon = True
-    web_thread.start()
-    logger.info("خادم الويب للـ Health Check يعمل في الخلفية.")
-
-    # قراءة متغيرات البيئة
+# --- الدالة الرئيسية لتشغيل البوت (فقط البوت) ---
+def run_bot():
+    logger.info("--- بدء تشغيل مكون البوت ---")
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
     TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
     BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
@@ -124,18 +100,13 @@ def main():
         logger.critical("!!! فشل: متغيرات البيئة غير كاملة. !!!")
         return
 
-    logger.info("--- جميع متغيرات البيئة موجودة. ---")
-
-    # الاتصال بالخدمات
     try:
         binance_client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
         binance_client.ping()
-        logger.info("تم الاتصال ببينانس بنجاح.")
     except Exception as e:
         logger.critical(f"فشل الاتصال ببينانس: {e}")
         return
 
-    # إعداد البوت
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     
@@ -144,10 +115,14 @@ def main():
     job_queue.run_repeating(scan_market, interval=SCAN_INTERVAL_SECONDS, first=10, data=job_data)
 
     logger.info("--- البوت جاهز ويعمل. جدولة فحص السوق كل 15 دقيقة. ---")
-    
-    # تشغيل البوت
     application.run_polling()
 
-if __name__ == "__main__":
-    main()
+# --- تشغيل البوت في ثريد منفصل ---
+# هذا يضمن أن البوت يعمل بشكل مستقل عن خادم الويب
+bot_thread = Thread(target=run_bot)
+bot_thread.daemon = True
+bot_thread.start()
+
+# Gunicorn سيستخدم كائن 'app' من هذا الملف.
+# لا نحتاج إلى if __name__ == "__main__": بعد الآن لتشغيل أي شيء.
 
