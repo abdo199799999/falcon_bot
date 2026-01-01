@@ -1,9 +1,92 @@
 # -----------------------------------------------------------------------------
-# bot.py - النسخة النهائية مع تصحيح حلقة الأحداث (Event Loop)
+# bot.py - النسخة النهائية مع إعادة السطر المفقود وتصحيح حلقة الأحداث
 # -----------------------------------------------------------------------------
 
-# ... (كل الكود من البداية حتى دالة run_bot يبقى كما هو تمامًا) ...
-# ... (imports, flask app, logging, strategy functions, scan_market, start) ...
+import os
+import logging
+import asyncio
+from threading import Thread
+from flask import Flask
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+from binance.client import Client
+
+# --- إعداد Flask (هذا هو السطر الذي كان مفقودًا) ---
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    return "Falcon Bot is alive with Gunicorn!", 200
+
+# --- إعدادات البوت (تبقى كما هي) ---
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+RSI_PERIOD = 14
+RSI_OVERSOLD = 30
+TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE
+SCAN_INTERVAL_SECONDS = 15 * 60
+
+# --- دوال الاستراتيجية والتحليل (لا تتغير) ---
+def calculate_rsi(df, period=14):
+    import pandas as pd
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def get_top_usdt_pairs(client, limit=100):
+    try:
+        all_tickers = client.get_ticker()
+        usdt_pairs = [t for t in all_tickers if t['symbol'].endswith('USDT') and 'UP' not in t['symbol'] and 'DOWN' not in t['symbol']]
+        return [p['symbol'] for p in sorted(usdt_pairs, key=lambda x: float(x['quoteVolume']), reverse=True)[:limit]]
+    except Exception as e:
+        logger.error(f"فشل في جلب قائمة العملات: {e}")
+        return []
+
+def check_strategy(client, symbol):
+    try:
+        import pandas as pd
+        klines = client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=RSI_PERIOD + 50)
+        if len(klines) < RSI_PERIOD + 2: return False
+        df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
+        df['close'] = pd.to_numeric(df['close'])
+        df['open'] = pd.to_numeric(df['open'])
+        df['RSI'] = calculate_rsi(df, RSI_PERIOD)
+        last_candle, prev_candle = df.iloc[-1], df.iloc[-2]
+        rsi_is_oversold = last_candle['RSI'] < RSI_OVERSOLD
+        is_bullish_engulfing = (last_candle['close'] > last_candle['open'] and prev_candle['close'] < prev_candle['open'] and last_candle['close'] > prev_candle['open'] and last_candle['open'] < prev_candle['close'])
+        if rsi_is_oversold and is_bullish_engulfing:
+            logger.info(f"🎯 تم العثور على فرصة! العملة: {symbol}, RSI: {last_candle['RSI']:.2f}")
+            return True
+    except Exception as e:
+        logger.error(f"خطأ غير متوقع أثناء فحص العملة {symbol}: {e}")
+    return False
+
+async def scan_market(context):
+    logger.info("--- بدء جولة فحص السوق ---")
+    client = context.job.data['binance_client']
+    chat_id = context.job.data['chat_id']
+    symbols_to_scan = get_top_usdt_pairs(client, limit=150)
+    if not symbols_to_scan:
+        logger.warning("لم يتم العثور على عملات لفحصها.")
+        return
+    found_signals = []
+    for symbol in symbols_to_scan:
+        if check_strategy(client, symbol):
+            found_signals.append(symbol)
+        await asyncio.sleep(0.2)
+    if found_signals:
+        message = "🚨 **إشارة شراء قوية (RSI + ابتلاعية)** 🚨\n\n"
+        for symbol in found_signals:
+            message += f"• <a href='https://www.binance.com/en/trade/{symbol}'>{symbol}</a>\n"
+        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML', disable_web_page_preview=True)
+    logger.info(f"--- انتهاء جولة الفحص. تم العثور على {len(found_signals)} إشارة. ---")
+
+async def start(update, context):
+    user = update.effective_user
+    await update.message.reply_html(f"أهلاً بك يا {user.mention_html()}!\n\nأنا **بوت الصقر** وجاهز للعمل.")
 
 # --- الدالة الرئيسية لتشغيل البوت (مع تصحيح حلقة الأحداث) ---
 def run_bot():
@@ -33,21 +116,15 @@ def run_bot():
 
     logger.info("--- البوت جاهز ويعمل. جدولة فحص السوق كل 15 دقيقة. ---")
     
-    # --- الجزء الذي تم تعديله ---
-    # بدلاً من application.run_polling() مباشرة
-    # نقوم بإنشاء حلقة أحداث جديدة خاصة بهذا الثريد
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    # الآن نقوم بتشغيل البوت داخل هذه الحلقة
     try:
         loop.run_until_complete(application.initialize())
         if application.post_init:
             loop.run_until_complete(application.post_init())
         loop.run_until_complete(application.updater.start_polling())
         loop.run_forever()
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("تلقى إشارة إيقاف، يتم إيقاف البوت...")
     finally:
         if application.updater.is_running:
             loop.run_until_complete(application.updater.stop())
@@ -55,6 +132,4 @@ def run_bot():
             loop.run_until_complete(application.post_shutdown())
         loop.run_until_complete(application.shutdown())
         loop.close()
-        logger.info("تم إيقاف البوت بنجاح.")
-
 
