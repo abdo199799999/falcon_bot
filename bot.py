@@ -1,22 +1,17 @@
 # -----------------------------------------------------------------------------
-# bot.py - النسخة النهائية مع تصحيح خطأ بناء الجملة في السطر 70
+# bot.py - النسخة النهائية (بوت فقط، بدون خادم ويب)
 # -----------------------------------------------------------------------------
 
 import os
 import logging
 import asyncio
 from threading import Thread
-from flask import Flask
+# لا يوجد استيراد لـ Flask هنا
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from binance.client import Client
 
-# --- إعداد Flask ---
-app = Flask(__name__)
-
-@app.route('/')
-def health_check():
-    return "Falcon Bot is alive with Gunicorn!", 200
+# لا يوجد كود Flask هنا
 
 # --- إعدادات البوت ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -67,7 +62,7 @@ def check_strategy(client, symbol):
 async def scan_market(context):
     logger.info("--- بدء جولة فحص السوق ---")
     client = context.job.data['binance_client']
-    chat_id = context.job.data['chat_id'] # <-- هذا هو السطر الذي تم تصحيحه
+    chat_id = context.job.data['chat_id']
     symbols_to_scan = get_top_usdt_pairs(client, limit=150)
     if not symbols_to_scan:
         logger.warning("لم يتم العثور على عملات لفحصها.")
