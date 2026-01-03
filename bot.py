@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# bot.py - نسخة احترافية مكملة (RSI EMA + حفظ العملات + أوامر إضافية)
+# bot.py - نسخة احترافية (RSI + EMA + MACD + Bollinger + ATR + فلترة السعر + ثقة الإشارة)
 # -----------------------------------------------------------------------------
 
 import os
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Falcon Bot Service (Pro v3) is Running!", 200
+    return "Falcon Bot Service (Pro v5) is Running!", 200
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
@@ -54,8 +54,9 @@ def save_watchlist(coins):
 # --- "ذاكرة" البوت ---
 bought_coins = load_watchlist()
 
-# --- دوال التحليل ---
+# --- دوال المؤشرات ---
 def calculate_indicators(df):
+    # --- RSI ---
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).fillna(0)
     loss = (-delta.where(delta < 0, 0)).fillna(0)
@@ -63,13 +64,48 @@ def calculate_indicators(df):
     avg_gain = gain.ewm(alpha=1/RSI_PERIOD, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1/RSI_PERIOD, adjust=False).mean()
 
-    rs = avg_gain / avg_loss
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
     df['RSI'] = 100 - (100 / (1 + rs))
 
+    # --- EMA ---
     df['EMA_SHORT'] = df['close'].ewm(span=EMA_SHORT_PERIOD, adjust=False).mean()
     df['EMA_LONG'] = df['close'].ewm(span=EMA_LONG_PERIOD, adjust=False).mean()
+
+    # --- MACD ---
+    ema12 = df['close'].ewm(span=12, adjust=False).mean()
+    ema26 = df['close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = ema12 - ema26
+    df['MACD_SIGNAL'] = df['MACD'].ewm(span=9, adjust=False).mean()
+
+    # --- Bollinger Bands ---
+    df['MA20'] = df['close'].rolling(window=20).mean()
+    df['STD20'] = df['close'].rolling(window=20).std()
+    df['BOLL_UPPER'] = df['MA20'] + (df['STD20'] * 2)
+    df['BOLL_LOWER'] = df['MA20'] - (df['STD20'] * 2)
+
+    # --- ATR ---
+    df['H-L'] = df['high'] - df['low']
+    df['H-C'] = abs(df['high'] - df['close'].shift())
+    df['L-C'] = abs(df['low'] - df['close'].shift())
+    df['TR'] = df[['H-L', 'H-C', 'L-C']].max(axis=1)
+    df['ATR'] = df['TR'].rolling(window=14).mean()
+
     return df
 
+# --- فلترة العملات حسب السعر ---
+def filter_by_price(client, symbols, max_price=100):
+    filtered = []
+    for symbol in symbols:
+        try:
+            ticker = client.get_symbol_ticker(symbol=symbol)
+            price = float(ticker['price'])
+            if price <= max_price:
+                filtered.append(symbol)
+        except Exception as e:
+            logger.error(f"فشل في جلب سعر {symbol}: {e}")
+    return filtered
+
+# --- جلب العملات الأعلى تداول ---
 def get_top_usdt_pairs(client, limit=100):
     try:
         all_tickers = client.get_ticker()
@@ -79,41 +115,51 @@ def get_top_usdt_pairs(client, limit=100):
         logger.error(f"فشل في جلب قائمة العملات: {e}")
         return []
 
+# --- تحليل العملة مع مستوى الثقة ---
 def analyze_symbol(client, symbol):
     try:
-        klines = client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=EMA_LONG_PERIOD + 50)
-        if len(klines) < EMA_LONG_PERIOD + 2: return 'HOLD', None
+        klines = client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=100)
+        if len(klines) < 50: 
+            return 'HOLD', None, 0
 
         df = pd.DataFrame(klines, columns=['timestamp','open','high','low','close','volume','close_time','quote_av','trades','tb_base_av','tb_quote_av','ignore'])
         df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].apply(pd.to_numeric)
 
-        last_candle_close_time_ms = int(df.iloc[-1]['close_time'])
-        current_time_ms = int(time.time() * 1000)
-        time_difference_minutes = (current_time_ms - last_candle_close_time_ms) / (1000 * 60)
-        if time_difference_minutes > 30:
-            logger.warning(f"بيانات {symbol} قديمة جدًا ({int(time_difference_minutes)} دقيقة). يتم تجاهلها.")
-            return 'HOLD', None
-
         df = calculate_indicators(df)
-        last_candle = df.iloc[-1]
-        prev_candle = df.iloc[-2]
-        current_price = last_candle['close']
+        last = df.iloc[-1]
 
-        is_uptrend = last_candle['EMA_SHORT'] > last_candle['EMA_LONG']
-        rsi_is_oversold = last_candle['RSI'] < RSI_OVERSOLD
-        is_bullish_engulfing = (last_candle['close'] > last_candle['open'] and prev_candle['close'] < prev_candle['open'] and last_candle['close'] > prev_candle['open'] and last_candle['open'] < prev_candle['close'])
+        confidence_buy = 0
+        confidence_sell = 0
+        signal = "HOLD"
 
-        if is_uptrend and rsi_is_oversold and is_bullish_engulfing:
-            return 'BUY', current_price
+        # --- شروط الشراء ---
+        if last['RSI'] < RSI_OVERSOLD: confidence_buy += 25
+        if last['EMA_SHORT'] > last['EMA_LONG']: confidence_buy += 25
+        if last['MACD'] > last['MACD_SIGNAL']: confidence_buy += 25
+        if last['close'] < last['BOLL_LOWER']: confidence_buy += 25
 
-        rsi_is_overbought = last_candle['RSI'] > RSI_OVERBOUGHT
-        if rsi_is_overbought:
-            return 'SELL', current_price
+        if confidence_buy >= 60:
+            signal = "BUY"
+            confidence = confidence_buy
+
+        # --- شروط البيع ---
+        if last['RSI'] > RSI_OVERBOUGHT: confidence_sell += 25
+        if last['EMA_SHORT'] < last['EMA_LONG']: confidence_sell += 25
+        if last['MACD'] < last['MACD_SIGNAL']: confidence_sell += 25
+        if last['close'] > last['BOLL_UPPER']: confidence_sell += 25
+
+        if confidence_sell >= 60:
+            signal = "SELL"
+            confidence = confidence_sell
+
+        if signal == "HOLD":
+            confidence = max(confidence_buy, confidence_sell)
+
+        return signal, last['close'], confidence
 
     except Exception as e:
-        logger.error(f"خطأ غير متوقع أثناء فحص العملة {symbol}: {e}")
-
-    return 'HOLD', None
+        logger.error(f"خطأ أثناء تحليل {symbol}: {e}")
+        return "HOLD", None, 0
 
 # --- مهمة الفحص الدوري ---
 async def scan_market(context):
@@ -121,20 +167,24 @@ async def scan_market(context):
     client = context.job.data['binance_client']
     chat_id = context.job.data['chat_id']
 
+    # فحص العملات المشتراة
     for symbol in list(bought_coins):
-        status, price = analyze_symbol(client, symbol)
+        status, price, confidence = analyze_symbol(client, symbol)
         if status == 'SELL':
-            await context.bot.send_message(chat_id=chat_id, text=f"💰 إشارة بيع: {symbol} بسعر {price}", parse_mode='HTML')
+            await context.bot.send_message(chat_id=chat_id, text=f"💰 إشارة بيع: {symbol} بسعر {price} (ثقة {confidence}%)", parse_mode='HTML')
             bought_coins.remove(symbol)
             save_watchlist(bought_coins)
         await asyncio.sleep(0.5)
 
+    # فحص السوق
     symbols_to_scan = get_top_usdt_pairs(client, limit=150)
+    symbols_to_scan = filter_by_price(client, symbols_to_scan, max_price=100)
+
     for symbol in symbols_to_scan:
         if symbol in bought_coins: continue
-        status, price = analyze_symbol(client, symbol)
+        status, price, confidence = analyze_symbol(client, symbol)
         if status == 'BUY':
-            await context.bot.send_message(chat_id=chat_id, text=f"🚨 إشارة شراء: {symbol} بسعر {price}", parse_mode='HTML')
+            await context.bot.send_message(chat_id=chat_id, text=f"🚨 إشارة شراء: {symbol} بسعر {price} (ثقة {confidence}%)", parse_mode='HTML')
             bought_coins.append(symbol)
             save_watchlist(bought_coins)
         await asyncio.sleep(0.5)
@@ -142,7 +192,7 @@ async def scan_market(context):
 # --- أوامر البوت ---
 async def start(update, context):
     user = update.effective_user
-    await update.message.reply_html(f"أهلاً {user.mention_html()}!\n\nأنا **بوت الصقر** (Pro v3) وجاهز للعمل.")
+    await update.message.reply_html(f"أهلاً {user.mention_html()}!\n\nأنا **بوت الصقر** (Pro v5) وجاهز للعمل.")
 
 async def status(update, context):
     if bought_coins:
@@ -155,33 +205,4 @@ async def status(update, context):
 def run_bot():
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
     TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-    BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
-    BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
-
-    if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, BINANCE_API_KEY, BINANCE_SECRET_KEY]):
-        logger.critical("!!! فشل: متغيرات البيئة غير كاملة. !!!")
-        return
-
-    try:
-        binance_client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
-        binance_client.ping()
-    except Exception as e:
-        logger.critical(f"فشل الاتصال ببينانس: {e}")
-        return
-
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("status", status))
-
-    job_data = {'binance_client': binance_client, 'chat_id': TELEGRAM_CHAT_ID}
-    job_queue = application.job_queue
-    job_queue.run_repeating(scan_market, interval=SCAN_INTERVAL_SECONDS, first=10, data=job_data)
-
-    application.run_polling()
-
-# --- نقطة البداية ---
-if __name__ == "__main__":
-    server_thread = Thread(target=run_server)
-    server_thread.daemon = True
-    server_thread.start()
-    run_bot()
+    BINANCE
