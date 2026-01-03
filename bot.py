@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# bot.py - النسخة النهائية (مصححة من خطأ بناء الجملة)
+# bot.py - نسخة مطورة (إشارات بيع + السعر الحالي)
 # -----------------------------------------------------------------------------
 
 import os
@@ -24,27 +24,30 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    """هذه الصفحة هي التي تزورها Render للتأكد من أن الخدمة حية."""
     return "Falcon Bot Service is Running!", 200
 
 def run_server():
-    """هذه الدالة تقوم بتشغيل خادم الويب."""
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
 
-# --- 2. كل ما يتعلق بالبوت (الاستراتيجية، الأوامر، إلخ) ---
+# --- 2. كل ما يتعلق بالبوت ---
 
-# إعدادات الاستراتيجية
+# --- إعدادات الاستراتيجية ---
 RSI_PERIOD = 14
 RSI_OVERSOLD = 30
+RSI_OVERBOUGHT = 70  # <-- جديد: حد التشبع الشرائي للبيع
 TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE
 SCAN_INTERVAL_SECONDS = 15 * 60
 
-# دوال التحليل
+# --- جديد: "ذاكرة" البوت لتتبع العملات المشتراة ---
+# هذه القائمة ستحتوي على العملات التي تم إرسال إشارة شراء لها
+bought_coins = []
+
+
+# --- دوال التحليل (مع تحديثات) ---
 def calculate_rsi(df, period=14):
     delta = df['close'].diff()
-    # السطران التاليان هما اللذان تم تصحيحهما
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
     rs = gain / loss
@@ -59,56 +62,95 @@ def get_top_usdt_pairs(client, limit=100):
         logger.error(f"فشل في جلب قائمة العملات: {e}")
         return []
 
-def check_strategy(client, symbol):
+def analyze_symbol(client, symbol):
+    """
+    دالة جديدة تحلل العملة وتعيد حالتها وسعرها.
+    الحالات الممكنة: 'BUY', 'SELL', 'HOLD'
+    """
     try:
         klines = client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=RSI_PERIOD + 50)
-        if len(klines) < RSI_PERIOD + 2: return False
+        if len(klines) < RSI_PERIOD + 2: return 'HOLD', None
+        
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
         df['close'] = pd.to_numeric(df['close'])
         df['open'] = pd.to_numeric(df['open'])
         df['RSI'] = calculate_rsi(df, RSI_PERIOD)
-        last_candle, prev_candle = df.iloc[-1], df.iloc[-2]
+        
+        last_candle = df.iloc[-1]
+        prev_candle = df.iloc[-2]
+        current_price = last_candle['close']
+
+        # --- منطق الشراء ---
         rsi_is_oversold = last_candle['RSI'] < RSI_OVERSOLD
         is_bullish_engulfing = (last_candle['close'] > last_candle['open'] and prev_candle['close'] < prev_candle['open'] and last_candle['close'] > prev_candle['open'] and last_candle['open'] < prev_candle['close'])
         if rsi_is_oversold and is_bullish_engulfing:
-            logger.info(f"🎯 تم العثور على فرصة! العملة: {symbol}, RSI: {last_candle['RSI']:.2f}")
-            return True
+            return 'BUY', current_price
+
+        # --- منطق البيع ---
+        rsi_is_overbought = last_candle['RSI'] > RSI_OVERBOUGHT
+        if rsi_is_overbought:
+            return 'SELL', current_price
+            
     except Exception as e:
         logger.error(f"خطأ غير متوقع أثناء فحص العملة {symbol}: {e}")
-    return False
+    
+    return 'HOLD', None
 
-# مهمة الفحص الدوري
+
+# --- مهمة الفحص الدوري (محدثة بالكامل) ---
 async def scan_market(context):
-    logger.info("--- بدء جولة فحص السوق ---")
+    global bought_coins
+    logger.info("--- بدء جولة فحص السوق (شراء + بيع) ---")
     client = context.job.data['binance_client']
     chat_id = context.job.data['chat_id']
-    symbols_to_scan = get_top_usdt_pairs(client, limit=150)
-    if not symbols_to_scan:
-        logger.warning("لم يتم العثور على عملات لفحصها.")
-        return
-    found_signals = []
-    for symbol in symbols_to_scan:
-        if check_strategy(client, symbol):
-            found_signals.append(symbol)
-        await asyncio.sleep(0.2)
-    if found_signals:
-        message = "🚨 **إشارة شراء قوية (RSI + ابتلاعية)** 🚨\n\n"
-        for symbol in found_signals:
-            message += f"• <a href='https://www.binance.com/en/trade/{symbol}'>{symbol}</a>\n"
-        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML', disable_web_page_preview=True)
-    logger.info(f"--- انتهاء جولة الفحص. تم العثور على {len(found_signals)} إشارة. ---")
+    
+    # 1. فحص العملات المشتراة (لإشارات البيع)
+    # نقوم بعمل نسخة من القائمة لتجنب المشاكل أثناء الحذف
+    for symbol in list(bought_coins):
+        status, price = analyze_symbol(client, symbol)
+        if status == 'SELL':
+            message = (
+                f"💰 **إشارة بيع (RSI تشبع شرائي)** 💰\n\n"
+                f"• <a href='https://www.binance.com/en/trade/{symbol}'>{symbol}</a>\n"
+                f"• **السعر الحالي:** `{price}`"
+            )
+            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML', disable_web_page_preview=True)
+            logger.info(f"💰 تم إرسال إشارة بيع للعملة: {symbol}. تتم إزالتها من قائمة المراقبة.")
+            bought_coins.remove(symbol) # إزالة العملة من الذاكرة بعد بيعها
+        await asyncio.sleep(0.5) # فاصل بسيط بين كل طلب
 
-# أمر /start
+    # 2. فحص أفضل العملات (لإشارات الشراء)
+    symbols_to_scan = get_top_usdt_pairs(client, limit=150)
+    for symbol in symbols_to_scan:
+        # نتجنب فحص العملات التي اشتريناها بالفعل مرة أخرى للشراء
+        if symbol in bought_coins:
+            continue
+            
+        status, price = analyze_symbol(client, symbol)
+        if status == 'BUY':
+            message = (
+                f"🚨 **إشارة شراء قوية (RSI + ابتلاعية)** 🚨\n\n"
+                f"• <a href='https://www.binance.com/en/trade/{symbol}'>{symbol}</a>\n"
+                f"• **السعر الحالي:** `{price}`"
+            )
+            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML', disable_web_page_preview=True)
+            logger.info(f"🎯 تم إرسال إشارة شراء للعملة: {symbol}. تتم إضافتها لقائمة المراقبة.")
+            bought_coins.append(symbol) # إضافة العملة للذاكرة لمراقبتها للبيع
+        await asyncio.sleep(0.5)
+
+    logger.info(f"--- انتهاء جولة الفحص. العملات قيد المراقبة حاليًا: {bought_coins} ---")
+
+
+# --- أمر /start ---
 async def start(update, context):
     logger.info(f"--- تم استلام أمر /start من المستخدم: {update.effective_user.id} ---")
     user = update.effective_user
-    await update.message.reply_html(f"أهلاً بك يا {user.mention_html()}!\n\nأنا **بوت الصقر** وجاهز للعمل.")
+    await update.message.reply_html(f"أهلاً بك يا {user.mention_html()}!\n\nأنا **بوت الصقر** (نسخة مطورة) وجاهز للعمل.")
 
-# دالة تشغيل البوت
+
+# --- دالة تشغيل البوت ---
 def run_bot():
-    """هذه الدالة تقوم بإعداد وتشغيل بوت التليجرام."""
     logger.info("--- بدء تشغيل مكون البوت ---")
-    
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
     TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
     BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
@@ -134,19 +176,16 @@ def run_bot():
     job_queue.run_repeating(scan_market, interval=SCAN_INTERVAL_SECONDS, first=10, data=job_data)
 
     logger.info("--- البوت جاهز ويعمل. جدولة فحص السوق كل 15 دقيقة. ---")
-    
     application.run_polling()
 
 
 # --- 3. نقطة البداية الرئيسية للتطبيق ---
 if __name__ == "__main__":
     logger.info("--- Starting Main Application ---")
-    
     server_thread = Thread(target=run_server)
     server_thread.daemon = True
     server_thread.start()
     logger.info("--- Web Server has been started in a background thread ---")
-    
     logger.info("--- Starting Bot in the main thread ---")
     run_bot()
 
