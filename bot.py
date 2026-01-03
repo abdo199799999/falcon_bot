@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# bot.py - نسخة مصححة (مع فحص زمني + إصلاح خطأ بناء الجملة)
+# bot.py - نسخة احترافية (EMA + RSI + شموع)
 # -----------------------------------------------------------------------------
 
 import os
@@ -22,11 +22,9 @@ logger = logging.getLogger(__name__)
 
 # --- 1. إعداد خادم الويب ---
 app = Flask(__name__)
-
 @app.route('/')
 def health_check():
-    return "Falcon Bot Service is Running!", 200
-
+    return "Falcon Bot Service (Pro Version) is Running!", 200
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
@@ -38,6 +36,8 @@ def run_server():
 RSI_PERIOD = 14
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
+EMA_SHORT_PERIOD = 21  # <-- جديد: EMA القصير
+EMA_LONG_PERIOD = 50   # <-- جديد: EMA الطويل
 TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE
 SCAN_INTERVAL_SECONDS = 15 * 60
 
@@ -45,13 +45,20 @@ SCAN_INTERVAL_SECONDS = 15 * 60
 bought_coins = []
 
 
-# --- دوال التحليل (مع إصلاح بناء الجملة) ---
-def calculate_rsi(df, period=14):
+# --- دوال التحليل (محدثة بالكامل) ---
+def calculate_indicators(df):
+    """دالة واحدة لحساب كل المؤشرات."""
+    # RSI
     delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    gain = (delta.where(delta > 0, 0)).rolling(window=RSI_PERIOD).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=RSI_PERIOD).mean()
     rs = gain / loss
-    return 100 - (100 / (1 + rs))
+    df['RSI'] = 100 - (100 / (1 + rs))
+    
+    # EMA
+    df['EMA_SHORT'] = df['close'].ewm(span=EMA_SHORT_PERIOD, adjust=False).mean()
+    df['EMA_LONG'] = df['close'].ewm(span=EMA_LONG_PERIOD, adjust=False).mean()
+    return df
 
 def get_top_usdt_pairs(client, limit=100):
     try:
@@ -64,43 +71,51 @@ def get_top_usdt_pairs(client, limit=100):
 
 def analyze_symbol(client, symbol):
     """
-    دالة التحليل المحدثة مع "شرط الأمان الزمني".
+    دالة التحليل المحدثة بالاستراتيجية الاحترافية.
     """
     try:
-        klines = client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=RSI_PERIOD + 50)
-        if len(klines) < RSI_PERIOD + 2: return 'HOLD', None
+        # نحتاج شموع أكثر لحساب EMA الطويل بشكل صحيح
+        klines = client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=EMA_LONG_PERIOD + 50)
+        if len(klines) < EMA_LONG_PERIOD + 2: return 'HOLD', None
         
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
         
         last_candle_close_time_ms = int(df.iloc[-1]['close_time'])
         current_time_ms = int(time.time() * 1000)
         time_difference_minutes = (current_time_ms - last_candle_close_time_ms) / (1000 * 60)
-        
         if time_difference_minutes > 30:
             logger.warning(f"بيانات {symbol} قديمة جدًا ({int(time_difference_minutes)} دقيقة). يتم تجاهلها.")
             return 'HOLD', None
 
         df['close'] = pd.to_numeric(df['close'])
         df['open'] = pd.to_numeric(df['open'])
-        df['RSI'] = calculate_rsi(df, RSI_PERIOD)
+        
+        # حساب كل المؤشرات
+        df = calculate_indicators(df)
         
         last_candle = df.iloc[-1]
         prev_candle = df.iloc[-2]
         current_price = last_candle['close']
 
+        # --- منطق الشراء الاحترافي ---
+        # 1. فلتر الاتجاه
+        is_uptrend = last_candle['EMA_SHORT'] > last_candle['EMA_LONG']
+        # 2. فلتر نقطة الدخول
         rsi_is_oversold = last_candle['RSI'] < RSI_OVERSOLD
+        # 3. فلتر التأكيد
         is_bullish_engulfing = (last_candle['close'] > last_candle['open'] and prev_candle['close'] < prev_candle['open'] and last_candle['close'] > prev_candle['open'] and last_candle['open'] < prev_candle['close'])
-        if rsi_is_oversold and is_bullish_engulfing:
+        
+        if is_uptrend and rsi_is_oversold and is_bullish_engulfing:
+            logger.info(f"🎯 إشارة احترافية! {symbol} | الاتجاه: صاعد, RSI: {last_candle['RSI']:.2f}, الشمعة: ابتلاعية")
             return 'BUY', current_price
 
+        # --- منطق البيع (يبقى كما هو حاليًا) ---
         rsi_is_overbought = last_candle['RSI'] > RSI_OVERBOUGHT
         if rsi_is_overbought:
             return 'SELL', current_price
             
-    # --- !!! هذا هو الجزء الذي كان مفقودًا !!! ---
     except Exception as e:
         logger.error(f"خطأ غير متوقع أثناء فحص العملة {symbol}: {e}")
-    # --- !!! نهاية الجزء المفقود !!! ---
     
     return 'HOLD', None
 
@@ -108,7 +123,7 @@ def analyze_symbol(client, symbol):
 # --- مهمة الفحص الدوري (لا تغيير هنا) ---
 async def scan_market(context):
     global bought_coins
-    logger.info("--- بدء جولة فحص السوق (شراء + بيع) ---")
+    logger.info("--- بدء جولة فحص السوق (احترافية) ---")
     client = context.job.data['binance_client']
     chat_id = context.job.data['chat_id']
     
@@ -128,7 +143,7 @@ async def scan_market(context):
         if symbol in bought_coins: continue
         status, price = analyze_symbol(client, symbol)
         if status == 'BUY':
-            message = (f"🚨 **إشارة شراء قوية (RSI + ابتلاعية)** 🚨\n\n"
+            message = (f"🚨 **إشارة شراء احترافية (EMA+RSI+Engulf)** 🚨\n\n"
                        f"• <a href='https://www.binance.com/en/trade/{symbol}'>{symbol}</a>\n"
                        f"• **السعر الحالي:** `{price}`")
             await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML', disable_web_page_preview=True)
@@ -143,7 +158,7 @@ async def scan_market(context):
 async def start(update, context):
     logger.info(f"--- تم استلام أمر /start من المستخدم: {update.effective_user.id} ---")
     user = update.effective_user
-    await update.message.reply_html(f"أهلاً بك يا {user.mention_html()}!\n\nأنا **بوت الصقر** (نسخة مصححة) وجاهز للعمل.")
+    await update.message.reply_html(f"أهلاً بك يا {user.mention_html()}!\n\nأنا **بوت الصقر** (النسخة الاحترافية) وجاهز للعمل.")
 
 
 # --- دالة تشغيل البوت ---
