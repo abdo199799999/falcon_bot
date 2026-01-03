@@ -1,11 +1,11 @@
 # -----------------------------------------------------------------------------
-# bot.py - نسخة مصححة (مع فحص زمني للبيانات)
+# bot.py - نسخة مصححة (مع فحص زمني + إصلاح خطأ بناء الجملة)
 # -----------------------------------------------------------------------------
 
 import os
 import logging
 import asyncio
-import time # <-- جديد: لاستيراد مكتبة الوقت
+import time
 from threading import Thread
 from flask import Flask
 from telegram import Update
@@ -45,7 +45,7 @@ SCAN_INTERVAL_SECONDS = 15 * 60
 bought_coins = []
 
 
-# --- دوال التحليل (مع تحديثات حاسمة) ---
+# --- دوال التحليل (مع إصلاح بناء الجملة) ---
 def calculate_rsi(df, period=14):
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -72,18 +72,13 @@ def analyze_symbol(client, symbol):
         
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
         
-        # --- !!! الإصلاح الحاسم: التحقق من عمر البيانات !!! ---
         last_candle_close_time_ms = int(df.iloc[-1]['close_time'])
         current_time_ms = int(time.time() * 1000)
-        
-        # نحسب الفارق الزمني بالدقائق
         time_difference_minutes = (current_time_ms - last_candle_close_time_ms) / (1000 * 60)
         
-        # إذا كانت البيانات أقدم من 30 دقيقة، فهي غير صالحة. تجاهلها.
         if time_difference_minutes > 30:
             logger.warning(f"بيانات {symbol} قديمة جدًا ({int(time_difference_minutes)} دقيقة). يتم تجاهلها.")
             return 'HOLD', None
-        # --- !!! نهاية الإصلاح الحاسم !!! ---
 
         df['close'] = pd.to_numeric(df['close'])
         df['open'] = pd.to_numeric(df['open'])
@@ -93,12 +88,102 @@ def analyze_symbol(client, symbol):
         prev_candle = df.iloc[-2]
         current_price = last_candle['close']
 
-        # --- منطق الشراء ---
         rsi_is_oversold = last_candle['RSI'] < RSI_OVERSOLD
         is_bullish_engulfing = (last_candle['close'] > last_candle['open'] and prev_candle['close'] < prev_candle['open'] and last_candle['close'] > prev_candle['open'] and last_candle['open'] < prev_candle['close'])
         if rsi_is_oversold and is_bullish_engulfing:
             return 'BUY', current_price
 
-        # --- منطق البيع ---
-        rsi_is_overbought = last_candle['RSI'] > RSI_
+        rsi_is_overbought = last_candle['RSI'] > RSI_OVERBOUGHT
+        if rsi_is_overbought:
+            return 'SELL', current_price
+            
+    # --- !!! هذا هو الجزء الذي كان مفقودًا !!! ---
+    except Exception as e:
+        logger.error(f"خطأ غير متوقع أثناء فحص العملة {symbol}: {e}")
+    # --- !!! نهاية الجزء المفقود !!! ---
+    
+    return 'HOLD', None
+
+
+# --- مهمة الفحص الدوري (لا تغيير هنا) ---
+async def scan_market(context):
+    global bought_coins
+    logger.info("--- بدء جولة فحص السوق (شراء + بيع) ---")
+    client = context.job.data['binance_client']
+    chat_id = context.job.data['chat_id']
+    
+    for symbol in list(bought_coins):
+        status, price = analyze_symbol(client, symbol)
+        if status == 'SELL':
+            message = (f"💰 **إشارة بيع (RSI تشبع شرائي)** 💰\n\n"
+                       f"• <a href='https://www.binance.com/en/trade/{symbol}'>{symbol}</a>\n"
+                       f"• **السعر الحالي:** `{price}`")
+            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML', disable_web_page_preview=True)
+            logger.info(f"💰 تم إرسال إشارة بيع للعملة: {symbol}. تتم إزالتها من قائمة المراقبة.")
+            bought_coins.remove(symbol)
+        await asyncio.sleep(0.5)
+
+    symbols_to_scan = get_top_usdt_pairs(client, limit=150)
+    for symbol in symbols_to_scan:
+        if symbol in bought_coins: continue
+        status, price = analyze_symbol(client, symbol)
+        if status == 'BUY':
+            message = (f"🚨 **إشارة شراء قوية (RSI + ابتلاعية)** 🚨\n\n"
+                       f"• <a href='https://www.binance.com/en/trade/{symbol}'>{symbol}</a>\n"
+                       f"• **السعر الحالي:** `{price}`")
+            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML', disable_web_page_preview=True)
+            logger.info(f"🎯 تم إرسال إشارة شراء للعملة: {symbol}. تتم إضافتها لقائمة المراقبة.")
+            bought_coins.append(symbol)
+        await asyncio.sleep(0.5)
+
+    logger.info(f"--- انتهاء جولة الفحص. العملات قيد المراقبة حاليًا: {bought_coins} ---")
+
+
+# --- أمر /start ---
+async def start(update, context):
+    logger.info(f"--- تم استلام أمر /start من المستخدم: {update.effective_user.id} ---")
+    user = update.effective_user
+    await update.message.reply_html(f"أهلاً بك يا {user.mention_html()}!\n\nأنا **بوت الصقر** (نسخة مصححة) وجاهز للعمل.")
+
+
+# --- دالة تشغيل البوت ---
+def run_bot():
+    logger.info("--- بدء تشغيل مكون البوت ---")
+    TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+    TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+    BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
+    BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
+
+    if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, BINANCE_API_KEY, BINANCE_SECRET_KEY]):
+        logger.critical("!!! فشل: متغيرات البيئة غير كاملة. لا يمكن تشغيل البوت. !!!")
+        return
+
+    try:
+        binance_client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
+        binance_client.ping()
+        logger.info("--- تم الاتصال والتحقق من واجهة بينانس بنجاح. ---")
+    except Exception as e:
+        logger.critical(f"فشل الاتصال ببينانس: {e}")
+        return
+
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    
+    job_data = {'binance_client': binance_client, 'chat_id': TELEGRAM_CHAT_ID}
+    job_queue = application.job_queue
+    job_queue.run_repeating(scan_market, interval=SCAN_INTERVAL_SECONDS, first=10, data=job_data)
+
+    logger.info("--- البوت جاهز ويعمل. جدولة فحص السوق كل 15 دقيقة. ---")
+    application.run_polling()
+
+
+# --- 3. نقطة البداية الرئيسية للتطبيق ---
+if __name__ == "__main__":
+    logger.info("--- Starting Main Application ---")
+    server_thread = Thread(target=run_server)
+    server_thread.daemon = True
+    server_thread.start()
+    logger.info("--- Web Server has been started in a background thread ---")
+    logger.info("--- Starting Bot in the main thread ---")
+    run_bot()
 
