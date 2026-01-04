@@ -1,10 +1,6 @@
-# ----------------------------------------------------->
-# requirements.txt - المكتبات المطلوبة للمشروع
-# ----------------------------------------------------->
-
 python-telegram-bot[job-queue]
 python-binance
 pandas
-numpy
 Flask
+tinydb-gist
 
