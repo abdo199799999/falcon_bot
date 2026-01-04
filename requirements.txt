@@ -2,5 +2,5 @@ python-telegram-bot[job-queue]
 python-binance
 pandas
 Flask
-tinydb-gist
+tinydb-github  <-- هذا هو التصحيح
 
