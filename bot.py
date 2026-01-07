@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# bot.py - نسخة مصححة (إطار زمني 1 ساعة)
+# bot.py - نسخة عبدالرحمن محمد (إطار زمني 15 دقيقة)
 # -----------------------------------------------------------------------------
 
 import os
@@ -38,9 +38,7 @@ def run_server():
 RSI_PERIOD = 14
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
-# !!! --- هذا هو التعديل --- !!!
-TIMEFRAME = Client.KLINE_INTERVAL_1HOUR
-# !!! --- نهاية التعديل --- !!!
+TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE
 SCAN_INTERVAL_SECONDS = 15 * 60
 
 # --- "ذاكرة" البوت ---
@@ -65,9 +63,6 @@ def get_top_usdt_pairs(client, limit=100):
         return []
 
 def analyze_symbol(client, symbol):
-    """
-    دالة التحليل المحدثة مع "شرط الأمان الزمني".
-    """
     try:
         klines = client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=RSI_PERIOD + 50)
         if len(klines) < RSI_PERIOD + 2: return 'HOLD', None
@@ -78,8 +73,7 @@ def analyze_symbol(client, symbol):
         current_time_ms = int(time.time() * 1000)
         time_difference_minutes = (current_time_ms - last_candle_close_time_ms) / (1000 * 60)
         
-        # بما أن الإطار الزمني ساعة، نتحقق إذا كانت البيانات أقدم من 90 دقيقة
-        if time_difference_minutes > 90:
+        if time_difference_minutes > 30:
             logger.warning(f"بيانات {symbol} قديمة جدًا ({int(time_difference_minutes)} دقيقة). يتم تجاهلها.")
             return 'HOLD', None
 
@@ -109,7 +103,7 @@ def analyze_symbol(client, symbol):
 # --- مهمة الفحص الدوري (لا تغيير هنا) ---
 async def scan_market(context):
     global bought_coins
-    logger.info("--- بدء جولة فحص السوق (شراء + بيع) - إطار 1 ساعة ---")
+    logger.info("--- بدء جولة فحص السوق (شراء + بيع) - إطار 15 دقيقة ---")
     client = context.job.data['binance_client']
     chat_id = context.job.data['chat_id']
     
@@ -144,7 +138,16 @@ async def scan_market(context):
 async def start(update, context):
     logger.info(f"--- تم استلام أمر /start من المستخدم: {update.effective_user.id} ---")
     user = update.effective_user
-    await update.message.reply_html(f"أهلاً بك يا {user.mention_html()}!\n\nأنا **بوت الصقر** (نسخة 1 ساعة) وجاهز للعمل.")
+    
+    # --- هذا هو النص الجديد ---
+    message = (
+        f"أهلاً بك يا {user.mention_html()}!\n\n"
+        f"أنا **بوت التداول الفوري النسخه الاحترافيه**.\n"
+        f"<i>صنع بواسطه المطور عبدالرحمن محمد</i>"
+    )
+    # --- نهاية النص الجديد ---
+    
+    await update.message.reply_html(message)
 
 
 # --- دالة تشغيل البوت ---
