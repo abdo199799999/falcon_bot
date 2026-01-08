@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# bot_bingx.py - نسخة العامل الصامت (مع التشخيص وتصحيح متغيرات البيئة)
+# bot_bingx.py - نسخة العامل الصامت (مع تصحيح نهائي لمتغيرات البيئة)
 # -----------------------------------------------------------------------------
 
 import os
@@ -14,13 +14,14 @@ import requests
 import hmac, hashlib
 from urllib.parse import urlencode
 
+# ... (كل الأجزاء الأخرى تبقى كما هي تمامًا) ...
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Falcon Bot Service (BingX Worker - Diagnostic Mode v2) is Running!", 200
+    return "Falcon Bot Service (BingX Worker - Final Fix) is Running!", 200
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
@@ -94,7 +95,8 @@ def analyze_symbol(symbol):
 
 async def scan_market(bot, chat_id):
     global bought_coins
-    logger.info("--- [BingX] بدء جولة فحص السوق (Diagnostic Mode v2) ---")
+    logger.info("--- [BingX] بدء جولة فحص السوق (Final Fix) ---")
+    # ... (بقية الدالة تبقى كما هي) ...
     for symbol in list(bought_coins):
         status, price = analyze_symbol(symbol)
         if status == 'SELL':
@@ -114,11 +116,13 @@ async def scan_market(bot, chat_id):
         await asyncio.sleep(0.5)
     logger.info(f"--- [BingX] انتهاء جولة الفحص. ---")
 
+
 async def main_logic():
-    # --- !!! هذا هو التصحيح الحاسم !!! ---
-    TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN_BINGX")
-    TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID_BINGX")
+    # --- !!! هذا هو التصحيح النهائي والحاسم !!! ---
+    TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+    TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
     # --- !!! نهاية التصحيح !!! ---
+    
     if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, API_KEY, API_SECRET]):
         logger.critical("!!! [BingX] فشل: متغيرات البيئة غير كاملة.")
         return
