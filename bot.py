@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# bot.py - نسخة v2.3 (إطار زمني 1 ساعة)
+# bot.py - نسخة v3.1 (MTFA + الهدف المتوقع)
 # -----------------------------------------------------------------------------
 
 import os
@@ -21,35 +21,33 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Falcon Bot Service (Binance - 1 Hour TF) is Running!", 200
+    return "Falcon Bot Service (Binance - MTFA Strategy v3.1) is Running!", 200
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
 # --- 2. إعدادات الاستراتيجية ---
 RSI_PERIOD = 14
-RSI_OVERSOLD = 35
+RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
-# !!! --- هذا هو التعديل --- !!!
-TIMEFRAME = Client.KLINE_INTERVAL_1HOUR
-# !!! --- نهاية التعديل --- !!!
-SCAN_INTERVAL_SECONDS = 60 * 60 # نغير الفحص ليصبح كل ساعة أيضًا ليتناسب مع الإطار الزمني
-MIN_CONFIDENCE_STRONG = 75
-MIN_CONFIDENCE_WEAK = 50
-bought_coins = {}
+SCAN_INTERVAL_SECONDS = 60 * 30 
+bought_coins = []
 
-# --- دوال التحليل المتقدمة ---
+# --- دوال التحليل (مع منطق MTFA) ---
 def calculate_indicators(df):
+    # RSI
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).ewm(alpha=1/RSI_PERIOD, adjust=False).mean()
     loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/RSI_PERIOD, adjust=False).mean()
     rs = gain / loss.replace(0, 1e-10)
     df['RSI'] = 100 - (100 / (1 + rs))
+    # MACD
+    ema12 = df['close'].ewm(span=12, adjust=False).mean()
+    ema26 = df['close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = ema12 - ema26
+    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    # MA20 (للهدف المتوقع)
     df['MA20'] = df['close'].rolling(window=20).mean()
-    df['STD20'] = df['close'].rolling(window=20).std()
-    df['BOLL_UPPER'] = df['MA20'] + (df['STD20'] * 2)
-    df['BOLL_LOWER'] = df['MA20'] - (df['STD20'] * 2)
-    df['MA200'] = df['close'].rolling(window=200).mean()
     return df
 
 def get_top_usdt_pairs(client, limit=150):
@@ -63,76 +61,102 @@ def get_top_usdt_pairs(client, limit=150):
 
 def analyze_symbol(client, symbol):
     try:
-        # نطلب شموع أكثر لتغطية إطار الساعة وحساب MA200
-        klines = client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=300)
-        if len(klines) < 200: return 'HOLD', 0, None, None
-        df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
-        df[['close', 'open', 'high', 'low', 'volume']] = df[['close', 'open', 'high', 'low', 'volume']].apply(pd.to_numeric)
-        df = calculate_indicators(df)
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        current_price = last['close']
-        if last['close'] < last['MA200']:
-            return 'HOLD', 0, None, current_price
-        confidence = 0
-        if last['RSI'] < RSI_OVERSOLD: confidence += 25
-        if last['close'] <= last['BOLL_LOWER']: confidence += 25
-        if (last['close'] > last['open'] and prev['close'] < prev['open'] and last['close'] > prev['open'] and last['open'] < prev['close']):
-            confidence += 25
-        if last['volume'] > df['volume'].rolling(window=20).mean().iloc[-1]: confidence += 25
-        expected_target = last['MA20']
-        if confidence >= MIN_CONFIDENCE_STRONG:
-            return 'STRONG_BUY', confidence, expected_target, current_price
-        if confidence >= MIN_CONFIDENCE_WEAK:
-            return 'WEAK_BUY', confidence, expected_target, current_price
+        # --- الخطوة 1: التحليل الاستراتيجي على إطار 4 ساعات (الفلتر) ---
+        klines_4h = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_4HOUR, limit=201)
+        if len(klines_4h) < 200: return 'HOLD', None, None
+        
+        df_4h = pd.DataFrame(klines_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
+        df_4h['close'] = pd.to_numeric(df_4h['close'])
+        df_4h['MA200'] = df_4h['close'].rolling(window=200).mean()
+        
+        last_4h = df_4h.iloc[-1]
+        
+        if last_4h['close'] < last_4h['MA200']:
+            return 'HOLD', None, None
+            
+        # --- الخطوة 2: البحث عن نقطة دخول على إطار الساعة الواحدة ---
+        klines_1h = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1HOUR, limit=100)
+        if len(klines_1h) < 50: return 'HOLD', None, None
+
+        df_1h = pd.DataFrame(klines_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
+        df_1h[['close', 'open']] = df_1h[['close', 'open']].apply(pd.to_numeric)
+        
+        df_1h = calculate_indicators(df_1h)
+        
+        last_1h = df_1h.iloc[-1]
+        prev_1h = df_1h.iloc[-2]
+        current_price = last_1h['close']
+        expected_target = last_1h['MA20'] # الهدف هو متوسط 20 على إطار الساعة
+
+        # شروط الشراء
+        rsi_is_oversold = last_1h['RSI'] < RSI_OVERSOLD
+        is_bullish_engulfing = (last_1h['close'] > last_1h['open'] and prev_1h['close'] < prev_1h['open'] and last_1h['close'] > prev_1h['open'] and last_1h['open'] < prev_1h['close'])
+        macd_is_bullish = last_1h['MACD'] > last_1h['MACD_Signal']
+
+        if rsi_is_oversold and is_bullish_engulfing and macd_is_bullish:
+            return 'BUY', current_price, expected_target
+
+        # شروط البيع
+        rsi_is_overbought = last_1h['RSI'] > RSI_OVERBOUGHT
+        macd_is_bearish = last_1h['MACD'] < last_1h['MACD_Signal']
+        if rsi_is_overbought and macd_is_bearish:
+            return 'SELL', current_price, None
+
     except Exception as e:
-        logger.error(f"[Binance] خطأ أثناء فحص {symbol}: {e}")
-    return 'HOLD', 0, None, None
+        logger.error(f"[Binance] خطأ أثناء فحص {symbol} (MTFA): {e}")
+    
+    return 'HOLD', None, None
 
 # --- مهمة الفحص الدوري ---
 async def scan_market(context):
     global bought_coins
-    logger.info("--- [Binance] بدء جولة فحص السوق (1 Hour TF) ---")
+    logger.info("--- [Binance] بدء جولة فحص السوق (MTFA Strategy v3.1) ---")
     client = context.job.data['binance_client']
     chat_id = context.job.data['chat_id']
+    
+    for symbol in list(bought_coins):
+        status, price, _ = analyze_symbol(client, symbol)
+        if status == 'SELL':
+            message = (f"💰 **[Binance] إشارة بيع (MTFA - 1H)** 💰\n\n"
+                       f"• **العملة:** `{symbol}`\n"
+                       f"• **السعر الحالي:** `{price}`")
+            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
+            bought_coins.remove(symbol)
+        await asyncio.sleep(1)
+
     symbols_to_scan = get_top_usdt_pairs(client, limit=150)
-    logger.info(f"[Binance] Found {len(symbols_to_scan)} symbols to scan.")
     for symbol in symbols_to_scan:
         if symbol in bought_coins: continue
-        status, confidence, target, current_price = analyze_symbol(client, symbol)
-        if status == 'STRONG_BUY':
+        status, current_price, target = analyze_symbol(client, symbol)
+        if status == 'BUY':
             if current_price > 0 and target > current_price:
                 profit_percentage = ((target / current_price) - 1) * 100
                 profit_text = f"• **الربح المتوقع:** `~{profit_percentage:.2f}%`\n"
             else:
                 profit_text = ""
-            message = (f"🚨 **[Binance] إشارة شراء قوية (1H)** 🚨\n\n"
+            
+            message = (f"🚨 **[Binance] إشارة شراء MTFA (4H + 1H)** 🚨\n\n"
                        f"• **العملة:** `{symbol}`\n"
                        f"• **السعر الحالي:** `{current_price}`\n"
                        f"• **الهدف المتوقع:** `{target:.4f}`\n"
-                       f"{profit_text}"
-                       f"• **الثقة:** `{confidence}%`")
+                       f"{profit_text}")
             await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
-            bought_coins[symbol] = {'buy_price': current_price}
-        elif status == 'WEAK_BUY':
-            message = (f"👀 **[Binance] إشارة ضعيفة للمراقبة (1H)** 👀\n\n"
-                       f"• **العملة:** `{symbol}`\n"
-                       f"• **السعر الحالي:** `{current_price}`\n"
-                       f"• **الثقة:** `{confidence}%`")
-            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
-        await asyncio.sleep(0.5)
+            bought_coins.append(symbol)
+        await asyncio.sleep(1)
+
     logger.info(f"--- [Binance] انتهاء جولة الفحص. ---")
 
 # --- أمر /start ---
 async def start(update, context):
     user = update.effective_user
     message = (f"أهلاً بك يا {user.mention_html()}!\n\n"
-               f"أنا **بوت التداول الفوري (Binance - نسخة 1 ساعة)**.\n"
+               f"أنا **بوت التداول الفوري (Binance - استراتيجية MTFA v3.1)**.\n"
                f"<i>صنع بواسطه المطور عبدالرحمن محمد</i>")
     await update.message.reply_html(message)
 
 # --- دالة تشغيل البوت ---
 def run_bot():
+    # ... (بقية الكود تبقى كما هي تمامًا) ...
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
     TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
     BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
