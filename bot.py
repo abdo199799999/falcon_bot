@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# bot.py - نسخة v2.2 (MA200 + إشارات متقدمة + نسبة الربح)
+# bot.py - نسخة v2.3 (إطار زمني 1 ساعة)
 # -----------------------------------------------------------------------------
 
 import os
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Falcon Bot Service (Binance - Advanced Signals v2.2) is Running!", 200
+    return "Falcon Bot Service (Binance - 1 Hour TF) is Running!", 200
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
@@ -30,8 +30,10 @@ def run_server():
 RSI_PERIOD = 14
 RSI_OVERSOLD = 35
 RSI_OVERBOUGHT = 70
-TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE
-SCAN_INTERVAL_SECONDS = 15 * 60
+# !!! --- هذا هو التعديل --- !!!
+TIMEFRAME = Client.KLINE_INTERVAL_1HOUR
+# !!! --- نهاية التعديل --- !!!
+SCAN_INTERVAL_SECONDS = 60 * 60 # نغير الفحص ليصبح كل ساعة أيضًا ليتناسب مع الإطار الزمني
 MIN_CONFIDENCE_STRONG = 75
 MIN_CONFIDENCE_WEAK = 50
 bought_coins = {}
@@ -61,7 +63,8 @@ def get_top_usdt_pairs(client, limit=150):
 
 def analyze_symbol(client, symbol):
     try:
-        klines = client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=200)
+        # نطلب شموع أكثر لتغطية إطار الساعة وحساب MA200
+        klines = client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=300)
         if len(klines) < 200: return 'HOLD', 0, None, None
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
         df[['close', 'open', 'high', 'low', 'volume']] = df[['close', 'open', 'high', 'low', 'volume']].apply(pd.to_numeric)
@@ -89,7 +92,7 @@ def analyze_symbol(client, symbol):
 # --- مهمة الفحص الدوري ---
 async def scan_market(context):
     global bought_coins
-    logger.info("--- [Binance] بدء جولة فحص السوق (Advanced Signals v2.2) ---")
+    logger.info("--- [Binance] بدء جولة فحص السوق (1 Hour TF) ---")
     client = context.job.data['binance_client']
     chat_id = context.job.data['chat_id']
     symbols_to_scan = get_top_usdt_pairs(client, limit=150)
@@ -103,7 +106,7 @@ async def scan_market(context):
                 profit_text = f"• **الربح المتوقع:** `~{profit_percentage:.2f}%`\n"
             else:
                 profit_text = ""
-            message = (f"🚨 **[Binance] إشارة شراء قوية** 🚨\n\n"
+            message = (f"🚨 **[Binance] إشارة شراء قوية (1H)** 🚨\n\n"
                        f"• **العملة:** `{symbol}`\n"
                        f"• **السعر الحالي:** `{current_price}`\n"
                        f"• **الهدف المتوقع:** `{target:.4f}`\n"
@@ -112,7 +115,7 @@ async def scan_market(context):
             await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
             bought_coins[symbol] = {'buy_price': current_price}
         elif status == 'WEAK_BUY':
-            message = (f"👀 **[Binance] إشارة ضعيفة للمراقبة** 👀\n\n"
+            message = (f"👀 **[Binance] إشارة ضعيفة للمراقبة (1H)** 👀\n\n"
                        f"• **العملة:** `{symbol}`\n"
                        f"• **السعر الحالي:** `{current_price}`\n"
                        f"• **الثقة:** `{confidence}%`")
@@ -124,7 +127,7 @@ async def scan_market(context):
 async def start(update, context):
     user = update.effective_user
     message = (f"أهلاً بك يا {user.mention_html()}!\n\n"
-               f"أنا **بوت التداول الفوري (Binance - نسخة MA200 المتقدمة)**.\n"
+               f"أنا **بوت التداول الفوري (Binance - نسخة 1 ساعة)**.\n"
                f"<i>صنع بواسطه المطور عبدالرحمن محمد</i>")
     await update.message.reply_html(message)
 
