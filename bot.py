@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# bot.py - نسخة v3.1 (MTFA + الهدف المتوقع)
+# bot.py - نسخة v3.2 (MTFA 4H + 15M)
 # -----------------------------------------------------------------------------
 
 import os
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Falcon Bot Service (Binance - MTFA Strategy v3.1) is Running!", 200
+    return "Falcon Bot Service (Binance - MTFA 4H+15M Strategy v3.2) is Running!", 200
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
@@ -30,7 +30,7 @@ def run_server():
 RSI_PERIOD = 14
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
-SCAN_INTERVAL_SECONDS = 60 * 30 
+SCAN_INTERVAL_SECONDS = 15 * 60 # فحص كل 15 دقيقة
 bought_coins = []
 
 # --- دوال التحليل (مع منطق MTFA) ---
@@ -74,31 +74,31 @@ def analyze_symbol(client, symbol):
         if last_4h['close'] < last_4h['MA200']:
             return 'HOLD', None, None
             
-        # --- الخطوة 2: البحث عن نقطة دخول على إطار الساعة الواحدة ---
-        klines_1h = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1HOUR, limit=100)
-        if len(klines_1h) < 50: return 'HOLD', None, None
+        # --- الخطوة 2: البحث عن نقطة دخول على إطار 15 دقيقة ---
+        klines_15m = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_15MINUTE, limit=100)
+        if len(klines_15m) < 50: return 'HOLD', None, None
 
-        df_1h = pd.DataFrame(klines_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
-        df_1h[['close', 'open']] = df_1h[['close', 'open']].apply(pd.to_numeric)
+        df_15m = pd.DataFrame(klines_15m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
+        df_15m[['close', 'open']] = df_15m[['close', 'open']].apply(pd.to_numeric)
         
-        df_1h = calculate_indicators(df_1h)
+        df_15m = calculate_indicators(df_15m)
         
-        last_1h = df_1h.iloc[-1]
-        prev_1h = df_1h.iloc[-2]
-        current_price = last_1h['close']
-        expected_target = last_1h['MA20'] # الهدف هو متوسط 20 على إطار الساعة
+        last_15m = df_15m.iloc[-1]
+        prev_15m = df_15m.iloc[-2]
+        current_price = last_15m['close']
+        expected_target = last_15m['MA20']
 
         # شروط الشراء
-        rsi_is_oversold = last_1h['RSI'] < RSI_OVERSOLD
-        is_bullish_engulfing = (last_1h['close'] > last_1h['open'] and prev_1h['close'] < prev_1h['open'] and last_1h['close'] > prev_1h['open'] and last_1h['open'] < prev_1h['close'])
-        macd_is_bullish = last_1h['MACD'] > last_1h['MACD_Signal']
+        rsi_is_oversold = last_15m['RSI'] < RSI_OVERSOLD
+        is_bullish_engulfing = (last_15m['close'] > last_15m['open'] and prev_15m['close'] < prev_15m['open'] and last_15m['close'] > prev_15m['open'] and last_15m['open'] < prev_15m['close'])
+        macd_is_bullish = last_15m['MACD'] > last_15m['MACD_Signal']
 
         if rsi_is_oversold and is_bullish_engulfing and macd_is_bullish:
             return 'BUY', current_price, expected_target
 
-        # شروط البيع
-        rsi_is_overbought = last_1h['RSI'] > RSI_OVERBOUGHT
-        macd_is_bearish = last_1h['MACD'] < last_1h['MACD_Signal']
+        # شروط البيع (على إطار 15 دقيقة)
+        rsi_is_overbought = last_15m['RSI'] > RSI_OVERBOUGHT
+        macd_is_bearish = last_15m['MACD'] < last_15m['MACD_Signal']
         if rsi_is_overbought and macd_is_bearish:
             return 'SELL', current_price, None
 
@@ -110,14 +110,14 @@ def analyze_symbol(client, symbol):
 # --- مهمة الفحص الدوري ---
 async def scan_market(context):
     global bought_coins
-    logger.info("--- [Binance] بدء جولة فحص السوق (MTFA Strategy v3.1) ---")
+    logger.info("--- [Binance] بدء جولة فحص السوق (MTFA 4H+15M) ---")
     client = context.job.data['binance_client']
     chat_id = context.job.data['chat_id']
     
     for symbol in list(bought_coins):
         status, price, _ = analyze_symbol(client, symbol)
         if status == 'SELL':
-            message = (f"💰 **[Binance] إشارة بيع (MTFA - 1H)** 💰\n\n"
+            message = (f"💰 **[Binance] إشارة بيع (MTFA - 15M)** 💰\n\n"
                        f"• **العملة:** `{symbol}`\n"
                        f"• **السعر الحالي:** `{price}`")
             await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
@@ -135,7 +135,7 @@ async def scan_market(context):
             else:
                 profit_text = ""
             
-            message = (f"🚨 **[Binance] إشارة شراء MTFA (4H + 1H)** 🚨\n\n"
+            message = (f"🚨 **[Binance] إشارة شراء MTFA (4H + 15M)** 🚨\n\n"
                        f"• **العملة:** `{symbol}`\n"
                        f"• **السعر الحالي:** `{current_price}`\n"
                        f"• **الهدف المتوقع:** `{target:.4f}`\n"
@@ -150,7 +150,7 @@ async def scan_market(context):
 async def start(update, context):
     user = update.effective_user
     message = (f"أهلاً بك يا {user.mention_html()}!\n\n"
-               f"أنا **بوت التداول الفوري (Binance - استراتيجية MTFA v3.1)**.\n"
+               f"أنا **بوت التداول الفوري (Binance - استراتيجية MTFA 4H+15M)**.\n"
                f"<i>صنع بواسطه المطور عبدالرحمن محمد</i>")
     await update.message.reply_html(message)
 
