@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# bot.py - نسخة v3.2 (MTFA 4H + 15M)
+# bot.py - نسخة v3.3 (MTFA 4H + 15M, RSI 35)
 # -----------------------------------------------------------------------------
 
 import os
@@ -21,14 +21,14 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Falcon Bot Service (Binance - MTFA 4H+15M Strategy v3.2) is Running!", 200
+    return "Falcon Bot Service (Binance - MTFA 4H+15M Strategy v3.3) is Running!", 200
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- 2. إعدادات الاستراتيجية ---
+# --- 2. إعدادات الاستراتيجية (تم التعديل هنا) ---
 RSI_PERIOD = 14
-RSI_OVERSOLD = 30
+RSI_OVERSOLD = 35  # <-- تم التغيير من 30 إلى 35 لزيادة الإشارات
 RSI_OVERBOUGHT = 70
 SCAN_INTERVAL_SECONDS = 15 * 60 # فحص كل 15 دقيقة
 bought_coins = []
@@ -64,25 +64,25 @@ def analyze_symbol(client, symbol):
         # --- الخطوة 1: التحليل الاستراتيجي على إطار 4 ساعات (الفلتر) ---
         klines_4h = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_4HOUR, limit=201)
         if len(klines_4h) < 200: return 'HOLD', None, None
-        
+
         df_4h = pd.DataFrame(klines_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
         df_4h['close'] = pd.to_numeric(df_4h['close'])
         df_4h['MA200'] = df_4h['close'].rolling(window=200).mean()
-        
+
         last_4h = df_4h.iloc[-1]
-        
+
         if last_4h['close'] < last_4h['MA200']:
             return 'HOLD', None, None
-            
+
         # --- الخطوة 2: البحث عن نقطة دخول على إطار 15 دقيقة ---
         klines_15m = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_15MINUTE, limit=100)
         if len(klines_15m) < 50: return 'HOLD', None, None
 
         df_15m = pd.DataFrame(klines_15m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
         df_15m[['close', 'open']] = df_15m[['close', 'open']].apply(pd.to_numeric)
-        
+
         df_15m = calculate_indicators(df_15m)
-        
+
         last_15m = df_15m.iloc[-1]
         prev_15m = df_15m.iloc[-2]
         current_price = last_15m['close']
@@ -104,16 +104,16 @@ def analyze_symbol(client, symbol):
 
     except Exception as e:
         logger.error(f"[Binance] خطأ أثناء فحص {symbol} (MTFA): {e}")
-    
+
     return 'HOLD', None, None
 
 # --- مهمة الفحص الدوري ---
 async def scan_market(context):
     global bought_coins
-    logger.info("--- [Binance] بدء جولة فحص السوق (MTFA 4H+15M) ---")
+    logger.info("--- [Binance] بدء جولة فحص السوق (MTFA 4H+15M, RSI 35) ---")
     client = context.job.data['binance_client']
     chat_id = context.job.data['chat_id']
-    
+
     for symbol in list(bought_coins):
         status, price, _ = analyze_symbol(client, symbol)
         if status == 'SELL':
@@ -134,7 +134,7 @@ async def scan_market(context):
                 profit_text = f"• **الربح المتوقع:** `~{profit_percentage:.2f}%`\n"
             else:
                 profit_text = ""
-            
+
             message = (f"🚨 **[Binance] إشارة شراء MTFA (4H + 15M)** 🚨\n\n"
                        f"• **العملة:** `{symbol}`\n"
                        f"• **السعر الحالي:** `{current_price}`\n"
@@ -156,7 +156,6 @@ async def start(update, context):
 
 # --- دالة تشغيل البوت ---
 def run_bot():
-    # ... (بقية الكود تبقى كما هي تمامًا) ...
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
     TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
     BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
