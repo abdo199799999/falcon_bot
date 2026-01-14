@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# bot.py - نسخة v4.0 (MTFA 1H, EMA+RSI+StochRSI+Volume)
+# bot.py - نسخة v4.1 (MTFA 1H, EMA+RSI+StochRSI+Volume, HTML)
 # -----------------------------------------------------------------------------
 
 import os
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Falcon Bot Service (Binance - MTFA 1H Strategy v4.0) is Running!", 200
+    return "Falcon Bot Service (Binance - MTFA 1H Strategy v4.1) is Running!", 200
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
@@ -111,10 +111,10 @@ async def scan_market(context):
     for symbol in list(bought_coins):
         status, price, _ = analyze_symbol(client, symbol)
         if status == 'SELL':
-            message = (f"💰 **[Binance] إشارة بيع (1H)** 💰\n\n"
-                       f"• **العملة:** `{symbol}`\n"
-                       f"• **السعر الحالي:** `{price}`")
-            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
+            message = (f"💰 <b>[Binance] إشارة بيع (1H)</b> 💰<br><br>"
+                       f"• <b>العملة:</b> {symbol}<br>"
+                       f"• <b>السعر الحالي:</b> {price}")
+            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML')
             bought_coins.remove(symbol)
         await asyncio.sleep(1)
 
@@ -123,10 +123,10 @@ async def scan_market(context):
         if symbol in bought_coins: continue
         status, current_price, _ = analyze_symbol(client, symbol)
         if status == 'BUY':
-            message = (f"🚨 **[Binance] إشارة شراء (1H)** 🚨\n\n"
-                       f"• **العملة:** `{symbol}`\n"
-                       f"• **السعر الحالي:** `{current_price}`")
-            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
+            message = (f"🚨 <b>[Binance] إشارة شراء (1H)</b> 🚨<br><br>"
+                       f"• <b>العملة:</b> {symbol}<br>"
+                       f"• <b>السعر الحالي:</b> {current_price}")
+            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML')
             bought_coins.append(symbol)
         await asyncio.sleep(1)
 
@@ -135,8 +135,8 @@ async def scan_market(context):
 # --- أمر /start ---
 async def start(update, context):
     user = update.effective_user
-    message = (f"👋 أهلاً بك أيها المطور {user.mention_html()}!\n\n"
-               f"أنا **بوت التداول الفوري (Binance - استراتيجية MTFA 1H)**.\n"
+    message = (f"👋 أهلاً بك أيها المطور {user.mention_html()}!<br><br>"
+               f"أنا <b>بوت التداول الفوري (Binance - استراتيجية MTFA 1H)</b>.<br>"
                f"<i>صنع بواسطه المطور عبدالرحمن محمد</i>")
     await update.message.reply_html(message)
 
