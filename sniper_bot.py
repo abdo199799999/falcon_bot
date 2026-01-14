@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# sniper_bot.py - Falcon Sniper v1.0 (Volume Anomaly Strategy)
+# sniper_bot.py - Falcon Sniper v1.1 (Optimized Scan Interval)
 # -----------------------------------------------------------------------------
 
 import os
@@ -11,7 +11,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from binance.client import Client
 import pandas as pd
-import numpy as np # سنحتاجه لحساب الانحراف المعياري
+import numpy as np
 
 # --- إعدادات التسجيل ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -21,23 +21,22 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Falcon Sniper Bot v1.0 is Running!", 200
+    return "Falcon Sniper Bot v1.1 is Running!", 200
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- إعدادات استراتيجية القنص ---
-TIME_INTERVAL = Client.KLINE_INTERVAL_5MINUTE # إطار زمني قصير
-VOLUME_THRESHOLD_MULTIPLIER = 10 # حجم التداول يجب أن يكون 10 أضعاف المتوسط
-PRICE_CHANGE_THRESHOLD = 3.0 # يجب أن يرتفع السعر 3% على الأقل في شمعة واحدة
-SCAN_INTERVAL_SECONDS = 1 * 60 # فحص كل دقيقة لسرعة الاستجابة
-bought_coins = {} # قاموس لتخزين العملات المشتراة وأهدافها
+# --- إعدادات استراتيجية القنص (تم التعديل هنا) ---
+TIME_INTERVAL = Client.KLINE_INTERVAL_5MINUTE
+VOLUME_THRESHOLD_MULTIPLIER = 10
+PRICE_CHANGE_THRESHOLD = 3.0
+SCAN_INTERVAL_SECONDS = 5 * 60 # فحص كل 5 دقائق (مُحسَّن)
+bought_coins = {}
 
 # --- دوال التحليل (استراتيجية القنص) ---
 def get_all_usdt_pairs(client):
     try:
         all_tickers = client.get_ticker()
-        # سنقوم بفحص كل العملات المتاحة تقريبًا
         return [t['symbol'] for t in all_tickers if t['symbol'].endswith('USDT')]
     except Exception as e:
         logger.error(f"[Sniper] فشل في جلب قائمة العملات: {e}")
@@ -50,25 +49,23 @@ def analyze_for_explosion(client, symbol):
 
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
         df['close'] = pd.to_numeric(df['close'])
+        df['open'] = pd.to_numeric(df['open'])
         df['volume'] = pd.to_numeric(df['volume'])
 
-        # استبعاد الشمعة الأخيرة (الحالية) للتحليل
         df_historical = df.iloc[:-1]
         last_candle = df.iloc[-1]
 
-        # --- الشرط الأول: شذوذ حجم التداول (Volume Anomaly) ---
         average_volume = df_historical['volume'].mean()
-        volume_is_anomalous = last_candle['volume'] > (average_volume * VOLUME_THRESHOLD_MULTIPLIER)
+        if average_volume == 0: return 'HOLD', None # تجنب القسمة على صفر
 
-        # --- الشرط الثاني: حركة السعر الإيجابية ---
+        volume_is_anomalous = last_candle['volume'] > (average_volume * VOLUME_THRESHOLD_MULTIPLIER)
         price_change = ((last_candle['close'] / last_candle['open']) - 1) * 100
         price_action_is_strong = price_change >= PRICE_CHANGE_THRESHOLD
 
         if volume_is_anomalous and price_action_is_strong:
             return 'BUY', last_candle['close']
 
-    except Exception as e:
-        # تجاهل الأخطاء البسيطة للعملات غير المتاحة
+    except Exception:
         pass
 
     return 'HOLD', None
@@ -76,11 +73,10 @@ def analyze_for_explosion(client, symbol):
 # --- مهمة الفحص الدوري ---
 async def scan_for_pumps(context):
     global bought_coins
-    logger.info("--- [Sniper] بدء جولة البحث عن انفجارات سعرية ---")
+    logger.info("--- [Sniper] بدء جولة البحث عن انفجارات سعرية (كل 5 دقائق) ---")
     client = context.job.data['binance_client']
     chat_id = context.job.data['chat_id']
 
-    # تحقق من أهداف العملات المشتراة
     for symbol, targets in list(bought_coins.items()):
         try:
             current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
@@ -104,8 +100,6 @@ async def scan_for_pumps(context):
             logger.error(f"[Sniper] خطأ في التحقق من سعر {symbol}: {e}")
         await asyncio.sleep(0.5)
 
-
-    # فحص عملات جديدة
     symbols_to_scan = get_all_usdt_pairs(client)
     for symbol in symbols_to_scan:
         if symbol in bought_coins: continue
@@ -113,8 +107,8 @@ async def scan_for_pumps(context):
         status, price = analyze_for_explosion(client, symbol)
         if status == 'BUY':
             buy_price = price
-            profit_target = buy_price * 1.15 # هدف ربح 15%
-            stop_loss = buy_price * 0.95   # وقف خسارة 5%
+            profit_target = buy_price * 1.15
+            stop_loss = buy_price * 0.95
             
             bought_coins[symbol] = {
                 'buy_price': buy_price,
@@ -129,11 +123,11 @@ async def scan_for_pumps(context):
                        f"• **وقف الخسارة:** `{stop_loss:.4f}` `(-5%)`")
             await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
         
-        await asyncio.sleep(0.5) # انتظار قصير بين كل عملة
+        await asyncio.sleep(0.5)
 
     logger.info(f"--- [Sniper] انتهاء جولة الفحص. العملات المراقبة: {list(bought_coins.keys())} ---")
 
-# --- دالة التشغيل الرئيسية (نفس الهيكل) ---
+# --- دالة التشغيل الرئيسية ---
 def main():
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
     TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
