@@ -1,166 +1,172 @@
 # -----------------------------------------------------------------------------
-# ccxt_bot.py - المحلل الفني الاحترافي v3.0 (متجاوب وغير متزامن)
+# bot.py - نسخة v4.0 (MTFA 1H, EMA+RSI+StochRSI+Volume)
 # -----------------------------------------------------------------------------
+
 import os
+import logging
 import asyncio
-import ccxt.async_support as ccxt # <-- استخدام النسخة غير المتزامنة لدعم تعدد المهام
-import pandas as pd
-import pandas_ta as ta
+import time
 from threading import Thread
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from binance.client import Client
+import pandas as pd
 
-# --- إعداد خادم الويب (للتوافق مع Render) ---
+# --- إعدادات التسجيل (Logging) ---
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# --- 1. إعداد خادم الويب ---
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Professional Analyzer Bot (v3.0) is Running and Responsive!", 200
+    return "Falcon Bot Service (Binance - MTFA 1H Strategy v4.0) is Running!", 200
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- قراءة متغيرات البيئة ---
-BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
-BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# --- 2. إعدادات الاستراتيجية ---
+SCAN_INTERVAL_SECONDS = 60 * 60   # فحص كل ساعة
+bought_coins = []
 
-# --- إعداد المؤشرات ---
-RSI_LENGTH = 6
-EMA_FAST = 7
-EMA_MID = 25
-EMA_SLOW = 99
-SCAN_INTERVAL_MINUTES = 10 # الفحص كل 10 دقائق
+# --- دوال التحليل (مؤشرات جديدة) ---
+def calculate_indicators(df):
+    # EMA
+    df['EMA7'] = df['close'].ewm(span=7, adjust=False).mean()
+    df['EMA25'] = df['close'].ewm(span=25, adjust=False).mean()
+    df['EMA99'] = df['close'].ewm(span=99, adjust=False).mean()
 
-# --- الأوامر (Commands) ---
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """أمر /start - يرسل رسالة ترحيب ويؤكد أن البوت يعمل"""
-    user = update.effective_user
-    await update.message.reply_html(
-        f"أهلاً بك يا {user.mention_html()}!\n\n"
-        f"أنا **بوت المحلل الفني (v3.0)**. أنا أعمل الآن وأستمع لأوامرك.\n"
-        f"سأقوم بفحص السوق كل {SCAN_INTERVAL_MINUTES} دقائق."
-    )
+    # RSI(6)
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/6, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/6, adjust=False).mean()
+    rs = gain / loss.replace(0, 1e-10)
+    df['RSI6'] = 100 - (100 / (1 + rs))
 
-# --- دوال التحليل (تم تحويلها إلى async) ---
-async def fetch_data(exchange, symbol, timeframe="1h", limit=200):
-    try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=["timestamp","open","high","low","close","volume"])
-        return df
-    except Exception:
-        return None
+    # StochRSI
+    rsi_min = df['RSI6'].rolling(window=14).min()
+    rsi_max = df['RSI6'].rolling(window=14).max()
+    df['StochRSI'] = (df['RSI6'] - rsi_min) / (rsi_max - rsi_min)
 
-def compute_indicators(df):
-    # هذه الدالة لا تحتاج إلى async لأنها تعتمد على pandas فقط
-    df[f"ema_{EMA_FAST}"] = ta.ema(df["close"], length=EMA_FAST)
-    df[f"ema_{EMA_MID}"]  = ta.ema(df["close"], length=EMA_MID)
-    df[f"ema_{EMA_SLOW}"] = ta.ema(df["close"], length=EMA_SLOW)
-    df[f"rsi_{RSI_LENGTH}"] = ta.rsi(df["close"], length=RSI_LENGTH)
-    stochrsi = ta.stochrsi(df["close"], length=14, rsi_length=14, k=3, d=3)
-    if stochrsi is not None and not stochrsi.empty:
-        df["stochrsi_k"] = stochrsi.get("STOCHRSIk_14_14_3_3")
-    else:
-        df["stochrsi_k"] = None
-    df["vol_ma_20"] = ta.sma(df["volume"], length=20)
+    # حجم التداول MA20
+    df['VolMA20'] = df['volume'].rolling(window=20).mean()
+
     return df.dropna()
 
-def generate_signal(row):
+def get_top_usdt_pairs(client, limit=150):
     try:
-        buy_cond = (
-            (row["close"] > row[f"ema_{EMA_FAST}"]) and
-            (row[f"ema_{EMA_FAST}"] > row[f"ema_{EMA_MID}"]) and
-            (row[f"ema_{EMA_MID}"] > row[f"ema_{EMA_SLOW}"]) and
-            (60 <= row[f"rsi_{RSI_LENGTH}"] <= 80) and
-            (40 <= row["stochrsi_k"] <= 60) and
-            (row["volume"] > row["vol_ma_20"]) and
-            (row["close"] > row["open"])
-        )
-        sell_cond = (
-            (row[f"rsi_{RSI_LENGTH}"] > 80 or row["stochrsi_k"] > 80) and
-            (row["close"] < row["open"])
-        )
-        if buy_cond: return "BUY"
-        elif sell_cond: return "SELL"
-        else: return "HOLD"
-    except Exception:
-        return "HOLD"
+        all_tickers = client.get_ticker()
+        usdt_pairs = [t for t in all_tickers if t['symbol'].endswith('USDT') and 'UP' not in t['symbol'] and 'DOWN' not in t['symbol']]
+        return [p['symbol'] for p in sorted(usdt_pairs, key=lambda x: float(x['quoteVolume']), reverse=True)[:limit]]
+    except Exception as e:
+        logger.error(f"[Binance] فشل في جلب قائمة العملات: {e}")
+        return []
 
-# --- المهمة الدورية (Background Job) ---
-async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
-    """المهمة التي تعمل في الخلفية لفحص السوق"""
-    exchange = context.job.data['exchange']
-    print("--- [Background Job] بدء جولة فحص جديدة ---")
-    
+def analyze_symbol(client, symbol):
     try:
-        markets = await exchange.load_markets()
-        spot_pairs = [s for s in markets if s.endswith('/USDT')]
+        # --- التحليل على إطار ساعة واحدة ---
+        klines_1h = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1HOUR, limit=120)
+        if len(klines_1h) < 100: 
+            return 'HOLD', None, None
 
-        for symbol in spot_pairs:
-            df = await fetch_data(exchange, symbol, "1h")
-            if df is None or df.empty: continue
-            
-            df = compute_indicators(df)
-            if df.empty: continue
-            
-            last = df.iloc[-1]
-            signal = generate_signal(last)
+        df_1h = pd.DataFrame(klines_1h, columns=['timestamp','open','high','low','close','volume','close_time','quote_av','trades','tb_base_av','tb_quote_av','ignore'])
+        df_1h[['close','open','volume']] = df_1h[['close','open','volume']].apply(pd.to_numeric)
 
-            if signal in ["BUY", "SELL"]:
-                msg = f"""👀 إشارة Binance (v3.0)
+        df_1h = calculate_indicators(df_1h)
 
-• العملة: {symbol.replace('/', '')}
-• السعر الحالي: {round(last['close'], 6)}
-• RSI: {round(last[f'rsi_{RSI_LENGTH}'], 2)}
-• الإشارة: {signal} ✅
-"""
-                await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
-                print(f"تم إرسال إشارة: {symbol} | {signal}")
-            
-            await asyncio.sleep(0.5) # انتظار بسيط لمنع إغراق الـ API
+        last = df_1h.iloc[-1]
+        current_price = last['close']
+
+        # شروط الشراء
+        ema_trend_up = last['close'] > last['EMA7'] > last['EMA25'] > last['EMA99']
+        rsi_ok = 60 <= last['RSI6'] <= 80
+        stoch_mid = 0.4 <= last['StochRSI'] <= 0.6
+        volume_ok = last['volume'] > last['VolMA20']
+        bullish_candle = last['close'] > last['open']
+
+        if ema_trend_up and rsi_ok and stoch_mid and volume_ok and bullish_candle:
+            return 'BUY', current_price, None
+
+        # شروط البيع
+        rsi_high = last['RSI6'] > 80
+        stoch_high = last['StochRSI'] > 0.8
+        bearish_candle = last['close'] < last['open']
+
+        if (rsi_high or stoch_high) and bearish_candle:
+            return 'SELL', current_price, None
 
     except Exception as e:
-        print(f"خطأ عام في المهمة الدورية: {e}")
-    finally:
-        print("--- [Background Job] انتهاء جولة الفحص ---")
+        logger.error(f"[Binance] خطأ أثناء فحص {symbol} (1h): {e}")
 
+    return 'HOLD', None, None
+
+# --- مهمة الفحص الدوري ---
+async def scan_market(context):
+    global bought_coins
+    logger.info("--- [Binance] بدء جولة فحص السوق (MTFA 1H, EMA+RSI+StochRSI+Volume) ---")
+    client = context.job.data['binance_client']
+    chat_id = context.job.data['chat_id']
+
+    for symbol in list(bought_coins):
+        status, price, _ = analyze_symbol(client, symbol)
+        if status == 'SELL':
+            message = (f"💰 **[Binance] إشارة بيع (1H)** 💰\n\n"
+                       f"• **العملة:** `{symbol}`\n"
+                       f"• **السعر الحالي:** `{price}`")
+            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
+            bought_coins.remove(symbol)
+        await asyncio.sleep(1)
+
+    symbols_to_scan = get_top_usdt_pairs(client, limit=150)
+    for symbol in symbols_to_scan:
+        if symbol in bought_coins: continue
+        status, current_price, _ = analyze_symbol(client, symbol)
+        if status == 'BUY':
+            message = (f"🚨 **[Binance] إشارة شراء (1H)** 🚨\n\n"
+                       f"• **العملة:** `{symbol}`\n"
+                       f"• **السعر الحالي:** `{current_price}`")
+            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
+            bought_coins.append(symbol)
+        await asyncio.sleep(1)
+
+    logger.info(f"--- [Binance] انتهاء جولة الفحص. ---")
+
+# --- أمر /start ---
+async def start(update, context):
+    user = update.effective_user
+    message = (f"👋 أهلاً بك أيها المطور {user.mention_html()}!\n\n"
+               f"أنا **بوت التداول الفوري (Binance - استراتيجية MTFA 1H)**.\n"
+               f"<i>صنع بواسطه المطور عبدالرحمن محمد</i>")
+    await update.message.reply_html(message)
+
+# --- دالة تشغيل البوت ---
+def run_bot():
+    TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+    TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+    BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
+    BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
+    if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, BINANCE_API_KEY, BINANCE_SECRET_KEY]):
+        logger.critical("!!! [Binance] فشل: متغيرات البيئة غير كاملة. !!!")
+        return
+    try:
+        binance_client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
+    except Exception as e:
+        logger.critical(f"فشل الاتصال ببينانس: {e}")
+        return
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    job_data = {'binance_client': binance_client, 'chat_id': TELEGRAM_CHAT_ID}
+    job_queue = application.job_queue
+    job_queue.run_repeating(scan_market, interval=SCAN_INTERVAL_SECONDS, first=10, data=job_data)
+    logger.info("--- [Binance] البوت جاهز ويعمل. ---")
+    application.run_polling()
 
 # --- نقطة البداية الرئيسية ---
-async def main():
-    print("--- بدء تشغيل التطبيق الرئيسي (v3.0) ---")
-    
-    # إعداد البوت
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    # إضافة الأوامر
-    application.add_handler(CommandHandler("start", start_command))
-
-    # إعداد وجدولة المهمة الدورية
-    job_queue = application.job_queue
-    exchange_instance = ccxt.binance({
-        "apiKey": BINANCE_API_KEY,
-        "secret": BINANCE_SECRET_KEY,
-        "enableRateLimit": True
-    })
-    job_data = {'exchange': exchange_instance}
-    job_queue.run_repeating(monitor_job, interval=SCAN_INTERVAL_MINUTES * 60, first=10, data=job_data)
-
-    print(f"--- البوت جاهز ويستمع. ستبدأ أول جولة فحص بعد 10 ثوانٍ ---")
-    
-    # تشغيل البوت (وضع الاستماع)
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-
-
 if __name__ == "__main__":
-    # تشغيل خادم الويب في خيط منفصل
+    logger.info("--- [Binance] Starting Main Application ---")
     server_thread = Thread(target=run_server)
     server_thread.daemon = True
     server_thread.start()
-    print("--- تم تشغيل خادم الويب ---")
-    
-    # تشغيل الحلقة الرئيسية غير المتزامنة
-    asyncio.run(main())
-
+    logger.info("--- [Binance] Web Server has been started. ---")
+    run_bot()
