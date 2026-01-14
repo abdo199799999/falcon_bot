@@ -1,84 +1,60 @@
 # -----------------------------------------------------------------------------
-# bot.py - نسخة v4.1 (MTFA 1H, EMA+RSI+StochRSI+Volume, HTML)
+# bot_webhook.py - نسخة v5.0 (MTFA 1H, EMA+RSI+StochRSI+Volume, Webhook + Flask)
 # -----------------------------------------------------------------------------
 
 import os
 import logging
 import asyncio
-import time
-from threading import Thread
-from flask import Flask
+from flask import Flask, request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+
 from binance.client import Client
 import pandas as pd
 
-# --- إعدادات التسجيل (Logging) ---
+# --- إعدادات التسجيل ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- 1. إعداد خادم الويب ---
+# --- إعداد Flask ---
 app = Flask(__name__)
-@app.route('/')
-def health_check():
-    return "Falcon Bot Service (Binance - MTFA 1H Strategy v4.1) is Running!", 200
-def run_server():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
 
-# --- 2. إعدادات الاستراتيجية ---
+# --- إعدادات الاستراتيجية ---
 SCAN_INTERVAL_SECONDS = 60 * 60   # فحص كل ساعة
 bought_coins = []
 
 # --- دوال التحليل (مؤشرات جديدة) ---
 def calculate_indicators(df):
-    # EMA
     df['EMA7'] = df['close'].ewm(span=7, adjust=False).mean()
     df['EMA25'] = df['close'].ewm(span=25, adjust=False).mean()
     df['EMA99'] = df['close'].ewm(span=99, adjust=False).mean()
 
-    # RSI(6)
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).ewm(alpha=1/6, adjust=False).mean()
     loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/6, adjust=False).mean()
     rs = gain / loss.replace(0, 1e-10)
     df['RSI6'] = 100 - (100 / (1 + rs))
 
-    # StochRSI
     rsi_min = df['RSI6'].rolling(window=14).min()
     rsi_max = df['RSI6'].rolling(window=14).max()
     df['StochRSI'] = (df['RSI6'] - rsi_min) / (rsi_max - rsi_min)
 
-    # حجم التداول MA20
     df['VolMA20'] = df['volume'].rolling(window=20).mean()
-
     return df.dropna()
-
-def get_top_usdt_pairs(client, limit=150):
-    try:
-        all_tickers = client.get_ticker()
-        usdt_pairs = [t for t in all_tickers if t['symbol'].endswith('USDT') and 'UP' not in t['symbol'] and 'DOWN' not in t['symbol']]
-        return [p['symbol'] for p in sorted(usdt_pairs, key=lambda x: float(x['quoteVolume']), reverse=True)[:limit]]
-    except Exception as e:
-        logger.error(f"[Binance] فشل في جلب قائمة العملات: {e}")
-        return []
 
 def analyze_symbol(client, symbol):
     try:
-        # --- التحليل على إطار ساعة واحدة ---
         klines_1h = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1HOUR, limit=120)
         if len(klines_1h) < 100: 
-            return 'HOLD', None, None
+            return 'HOLD', None
 
         df_1h = pd.DataFrame(klines_1h, columns=['timestamp','open','high','low','close','volume','close_time','quote_av','trades','tb_base_av','tb_quote_av','ignore'])
         df_1h[['close','open','volume']] = df_1h[['close','open','volume']].apply(pd.to_numeric)
-
         df_1h = calculate_indicators(df_1h)
 
         last = df_1h.iloc[-1]
         current_price = last['close']
 
-        # شروط الشراء
         ema_trend_up = last['close'] > last['EMA7'] > last['EMA25'] > last['EMA99']
         rsi_ok = 60 <= last['RSI6'] <= 80
         stoch_mid = 0.4 <= last['StochRSI'] <= 0.6
@@ -86,87 +62,48 @@ def analyze_symbol(client, symbol):
         bullish_candle = last['close'] > last['open']
 
         if ema_trend_up and rsi_ok and stoch_mid and volume_ok and bullish_candle:
-            return 'BUY', current_price, None
+            return 'BUY', current_price
 
-        # شروط البيع
         rsi_high = last['RSI6'] > 80
         stoch_high = last['StochRSI'] > 0.8
         bearish_candle = last['close'] < last['open']
 
         if (rsi_high or stoch_high) and bearish_candle:
-            return 'SELL', current_price, None
+            return 'SELL', current_price
 
     except Exception as e:
-        logger.error(f"[Binance] خطأ أثناء فحص {symbol} (1h): {e}")
+        logger.error(f"[Binance] خطأ أثناء فحص {symbol}: {e}")
 
-    return 'HOLD', None, None
-
-# --- مهمة الفحص الدوري ---
-async def scan_market(context):
-    global bought_coins
-    logger.info("--- [Binance] بدء جولة فحص السوق (MTFA 1H, EMA+RSI+StochRSI+Volume) ---")
-    client = context.job.data['binance_client']
-    chat_id = context.job.data['chat_id']
-
-    for symbol in list(bought_coins):
-        status, price, _ = analyze_symbol(client, symbol)
-        if status == 'SELL':
-            message = (f"💰 <b>[Binance] إشارة بيع (1H)</b> 💰<br><br>"
-                       f"• <b>العملة:</b> {symbol}<br>"
-                       f"• <b>السعر الحالي:</b> {price}")
-            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML')
-            bought_coins.remove(symbol)
-        await asyncio.sleep(1)
-
-    symbols_to_scan = get_top_usdt_pairs(client, limit=150)
-    for symbol in symbols_to_scan:
-        if symbol in bought_coins: continue
-        status, current_price, _ = analyze_symbol(client, symbol)
-        if status == 'BUY':
-            message = (f"🚨 <b>[Binance] إشارة شراء (1H)</b> 🚨<br><br>"
-                       f"• <b>العملة:</b> {symbol}<br>"
-                       f"• <b>السعر الحالي:</b> {current_price}")
-            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML')
-            bought_coins.append(symbol)
-        await asyncio.sleep(1)
-
-    logger.info(f"--- [Binance] انتهاء جولة الفحص. ---")
+    return 'HOLD', None
 
 # --- أمر /start ---
-async def start(update, context):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    message = (f"👋 أهلاً بك أيها المطور {user.mention_html()}!<br><br>"
+    message = (f"👋 أهلاً بك يا {user.mention_html()}!<br><br>"
                f"أنا <b>بوت التداول الفوري (Binance - استراتيجية MTFA 1H)</b>.<br>"
                f"<i>صنع بواسطه المطور عبدالرحمن محمد</i>")
     await update.message.reply_html(message)
 
-# --- دالة تشغيل البوت ---
-def run_bot():
-    TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-    TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-    BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
-    BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
-    if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, BINANCE_API_KEY, BINANCE_SECRET_KEY]):
-        logger.critical("!!! [Binance] فشل: متغيرات البيئة غير كاملة. !!!")
-        return
-    try:
-        binance_client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
-    except Exception as e:
-        logger.critical(f"فشل الاتصال ببينانس: {e}")
-        return
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    job_data = {'binance_client': binance_client, 'chat_id': TELEGRAM_CHAT_ID}
-    job_queue = application.job_queue
-    job_queue.run_repeating(scan_market, interval=SCAN_INTERVAL_SECONDS, first=10, data=job_data)
-    logger.info("--- [Binance] البوت جاهز ويعمل. ---")
-    application.run_polling()
+# --- إعداد Webhook ---
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
+BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
 
-# --- نقطة البداية الرئيسية ---
+application = Application.builder().token(TELEGRAM_TOKEN).build()
+application.add_handler(CommandHandler("start", start))
+
+@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    application.update_queue.put_nowait(update)
+    return "ok", 200
+
+@app.route("/")
+def index():
+    return "Falcon Bot Webhook Service is Running!", 200
+
+# --- نقطة البداية ---
 if __name__ == "__main__":
-    logger.info("--- [Binance] Starting Main Application ---")
-    server_thread = Thread(target=run_server)
-    server_thread.daemon = True
-    server_thread.start()
-    logger.info("--- [Binance] Web Server has been started. ---")
-    run_bot()
+    logger.info("--- [Binance] Starting Webhook Application ---")
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
