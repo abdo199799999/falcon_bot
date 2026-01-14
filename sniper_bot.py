@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# sniper_bot.py - Falcon Sniper v1.1 (Optimized Scan Interval)
+# sniper_bot.py - Falcon Sniper v1.2 (Message Formatting Fix)
 # -----------------------------------------------------------------------------
 
 import os
@@ -21,19 +21,19 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Falcon Sniper Bot v1.1 is Running!", 200
+    return "Falcon Sniper Bot v1.2 is Running!", 200
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- إعدادات استراتيجية القنص (تم التعديل هنا) ---
+# --- إعدادات استراتيجية القنص ---
 TIME_INTERVAL = Client.KLINE_INTERVAL_5MINUTE
 VOLUME_THRESHOLD_MULTIPLIER = 10
 PRICE_CHANGE_THRESHOLD = 3.0
-SCAN_INTERVAL_SECONDS = 5 * 60 # فحص كل 5 دقائق (مُحسَّن)
+SCAN_INTERVAL_SECONDS = 5 * 60
 bought_coins = {}
 
-# --- دوال التحليل (استراتيجية القنص) ---
+# --- دوال التحليل ---
 def get_all_usdt_pairs(client):
     try:
         all_tickers = client.get_ticker()
@@ -56,7 +56,7 @@ def analyze_for_explosion(client, symbol):
         last_candle = df.iloc[-1]
 
         average_volume = df_historical['volume'].mean()
-        if average_volume == 0: return 'HOLD', None # تجنب القسمة على صفر
+        if average_volume == 0: return 'HOLD', None
 
         volume_is_anomalous = last_candle['volume'] > (average_volume * VOLUME_THRESHOLD_MULTIPLIER)
         price_change = ((last_candle['close'] / last_candle['open']) - 1) * 100
@@ -81,20 +81,20 @@ async def scan_for_pumps(context):
         try:
             current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
             if current_price >= targets['profit_target']:
-                message = (f"🎯 **[Sniper] تم تحقيق الهدف** 🎯\n\n"
-                           f"• **العملة:** `{symbol}`\n"
-                           f"• **سعر الشراء:** `{targets['buy_price']}`\n"
-                           f"• **سعر البيع:** `{current_price}`\n"
-                           f"• **الربح:** `~15%`")
-                await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
+                message = (f"🎯 *[Sniper] تم تحقيق الهدف*\n\n"
+                           f"• *العملة:* `{symbol}`\n"
+                           f"• *سعر الشراء:* `{targets['buy_price']}`\n"
+                           f"• *سعر البيع:* `{current_price}`\n"
+                           f"• *الربح:* `~15%`")
+                await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
                 del bought_coins[symbol]
             elif current_price <= targets['stop_loss']:
-                message = (f"🛑 **[Sniper] تم تفعيل وقف الخسارة** 🛑\n\n"
-                           f"• **العملة:** `{symbol}`\n"
-                           f"• **سعر الشراء:** `{targets['buy_price']}`\n"
-                           f"• **سعر البيع:** `{current_price}`\n"
-                           f"• **الخسارة:** `~-5%`")
-                await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
+                message = (f"🛑 *[Sniper] تم تفعيل وقف الخسارة*\n\n"
+                           f"• *العملة:* `{symbol}`\n"
+                           f"• *سعر الشراء:* `{targets['buy_price']}`\n"
+                           f"• *سعر البيع:* `{current_price}`\n"
+                           f"• *الخسارة:* `~-5%`")
+                await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
                 del bought_coins[symbol]
         except Exception as e:
             logger.error(f"[Sniper] خطأ في التحقق من سعر {symbol}: {e}")
@@ -115,19 +115,24 @@ async def scan_for_pumps(context):
                 'profit_target': profit_target,
                 'stop_loss': stop_loss
             }
+            # --- تم التعديل هنا ---
+            # تم تغيير الرسالة لتكون متوافقة مع Markdown
+            message = (f"🚀 *[Sniper] تم رصد انفجار سعري محتمل*\n\n"
+                       f"• *العملة:* `{symbol}`\n"
+                       f"• *السعر الحالي:* `{buy_price}`\n"
+                       f"• *الهدف:* `{profit_target:.4f}` `(+15%)`\n"
+                       f"• *وقف الخسارة:* `{stop_loss:.4f}` `(-5%)`")
+            try:
+                # تم تغيير parse_mode إلى 'Markdown' الأقل صرامة
+                await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+            except Exception as e:
+                logger.error(f"فشل إرسال رسالة القنص: {e}")
 
-            message = (f"🚀 **[Sniper] تم رصد انفجار سعري محتمل!** 🚀\n\n"
-                       f"• **العملة:** `{symbol}`\n"
-                       f"• **السعر الحالي:** `{buy_price}`\n"
-                       f"• **الهدف:** `{profit_target:.4f}` `(+15%)`\n"
-                       f"• **وقف الخسارة:** `{stop_loss:.4f}` `(-5%)`")
-            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
-        
         await asyncio.sleep(0.5)
 
     logger.info(f"--- [Sniper] انتهاء جولة الفحص. العملات المراقبة: {list(bought_coins.keys())} ---")
 
-# --- دالة التشغيل الرئيسية ---
+# --- دالة التشغيل الرئيسية (بدون تغيير) ---
 def main():
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
     TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
