@@ -1,9 +1,5 @@
-python-telegram-bot[job-queue]
-python-binance
-pandas
 Flask
-tqdm
-numpy
-ccxt
-requests
-pandas-ta
+pandas
+python-binance
+python-telegram-bot[job-queue]
+
