@@ -1,11 +1,10 @@
 # -----------------------------------------------------------------------------
-# bot.py - نسخة v3.3 (MTFA 4H + 15M, RSI 35)
+# bot.py - نسخة استراتيجية 30 دقيقة
 # -----------------------------------------------------------------------------
 
 import os
 import logging
 import asyncio
-import time
 from threading import Thread
 from flask import Flask
 from telegram import Update
@@ -21,19 +20,19 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Falcon Bot Service (Binance - MTFA 4H+15M Strategy v3.3) is Running!", 200
+    return "Falcon Bot Service (Binance - 30M Strategy) is Running!", 200
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- 2. إعدادات الاستراتيجية (تم التعديل هنا) ---
+# --- 2. إعدادات الاستراتيجية ---
 RSI_PERIOD = 14
-RSI_OVERSOLD = 35  # <-- تم التغيير من 30 إلى 35 لزيادة الإشارات
+RSI_OVERSOLD = 35
 RSI_OVERBOUGHT = 70
 SCAN_INTERVAL_SECONDS = 15 * 60 # فحص كل 15 دقيقة
 bought_coins = []
 
-# --- دوال التحليل (مع منطق MTFA) ---
+# --- دوال التحليل ---
 def calculate_indicators(df):
     # RSI
     delta = df['close'].diff()
@@ -61,63 +60,50 @@ def get_top_usdt_pairs(client, limit=150):
 
 def analyze_symbol(client, symbol):
     try:
-        # --- الخطوة 1: التحليل الاستراتيجي على إطار 4 ساعات (الفلتر) ---
-        klines_4h = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_4HOUR, limit=201)
-        if len(klines_4h) < 200: return 'HOLD', None, None
+        # --- تم التعديل هنا: الاعتماد فقط على إطار 30 دقيقة ---
+        klines_30m = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_30MINUTE, limit=100)
+        if len(klines_30m) < 50: return 'HOLD', None, None
 
-        df_4h = pd.DataFrame(klines_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
-        df_4h['close'] = pd.to_numeric(df_4h['close'])
-        df_4h['MA200'] = df_4h['close'].rolling(window=200).mean()
+        df_30m = pd.DataFrame(klines_30m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
+        df_30m[['close', 'open']] = df_30m[['close', 'open']].apply(pd.to_numeric)
 
-        last_4h = df_4h.iloc[-1]
+        df_30m = calculate_indicators(df_30m)
 
-        if last_4h['close'] < last_4h['MA200']:
-            return 'HOLD', None, None
-
-        # --- الخطوة 2: البحث عن نقطة دخول على إطار 15 دقيقة ---
-        klines_15m = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_15MINUTE, limit=100)
-        if len(klines_15m) < 50: return 'HOLD', None, None
-
-        df_15m = pd.DataFrame(klines_15m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
-        df_15m[['close', 'open']] = df_15m[['close', 'open']].apply(pd.to_numeric)
-
-        df_15m = calculate_indicators(df_15m)
-
-        last_15m = df_15m.iloc[-1]
-        prev_15m = df_15m.iloc[-2]
-        current_price = last_15m['close']
-        expected_target = last_15m['MA20']
+        last_30m = df_30m.iloc[-1]
+        prev_30m = df_30m.iloc[-2]
+        current_price = last_30m['close']
+        expected_target = last_30m['MA20']
 
         # شروط الشراء
-        rsi_is_oversold = last_15m['RSI'] < RSI_OVERSOLD
-        is_bullish_engulfing = (last_15m['close'] > last_15m['open'] and prev_15m['close'] < prev_15m['open'] and last_15m['close'] > prev_15m['open'] and last_15m['open'] < prev_15m['close'])
-        macd_is_bullish = last_15m['MACD'] > last_15m['MACD_Signal']
+        rsi_is_oversold = last_30m['RSI'] < RSI_OVERSOLD
+        is_bullish_engulfing = (last_30m['close'] > last_30m['open'] and prev_30m['close'] < prev_30m['open'] and last_30m['close'] > prev_30m['open'] and last_30m['open'] < prev_30m['close'])
+        macd_is_bullish = last_30m['MACD'] > last_30m['MACD_Signal']
 
         if rsi_is_oversold and is_bullish_engulfing and macd_is_bullish:
             return 'BUY', current_price, expected_target
 
-        # شروط البيع (على إطار 15 دقيقة)
-        rsi_is_overbought = last_15m['RSI'] > RSI_OVERBOUGHT
-        macd_is_bearish = last_15m['MACD'] < last_15m['MACD_Signal']
+        # شروط البيع
+        rsi_is_overbought = last_30m['RSI'] > RSI_OVERBOUGHT
+        macd_is_bearish = last_30m['MACD'] < last_30m['MACD_Signal']
         if rsi_is_overbought and macd_is_bearish:
             return 'SELL', current_price, None
 
     except Exception as e:
-        logger.error(f"[Binance] خطأ أثناء فحص {symbol} (MTFA): {e}")
+        logger.error(f"[Binance] خطأ أثناء فحص {symbol}: {e}")
 
     return 'HOLD', None, None
 
 # --- مهمة الفحص الدوري ---
 async def scan_market(context):
     global bought_coins
-    logger.info("--- [Binance] بدء جولة فحص السوق (MTFA 4H+15M, RSI 35) ---")
+    logger.info("--- [Binance] بدء جولة فحص السوق (استراتيجية 30 دقيقة) ---")
     client = context.job.data['binance_client']
     chat_id = context.job.data['chat_id']
 
     for symbol in list(bought_coins):
         status, price, _ = analyze_symbol(client, symbol)
         if status == 'SELL':
-            message = (f"💰 **[Binance] إشارة بيع (MTFA - 15M)** 💰\n\n"
+            message = (f"💰 **[Binance] إشارة بيع (30M Strategy)** 💰\n\n"
                        f"• **العملة:** `{symbol}`\n"
                        f"• **السعر الحالي:** `{price}`")
             await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
@@ -135,7 +121,7 @@ async def scan_market(context):
             else:
                 profit_text = ""
 
-            message = (f"🚨 **[Binance] إشارة شراء MTFA (4H + 15M)** 🚨\n\n"
+            message = (f"🚨 **[Binance] إشارة شراء (30M Strategy)** 🚨\n\n"
                        f"• **العملة:** `{symbol}`\n"
                        f"• **السعر الحالي:** `{current_price}`\n"
                        f"• **الهدف المتوقع:** `{target:.4f}`\n"
@@ -150,7 +136,7 @@ async def scan_market(context):
 async def start(update, context):
     user = update.effective_user
     message = (f"أهلاً بك يا {user.mention_html()}!\n\n"
-               f"أنا **بوت التداول الفوري (Binance - استراتيجية MTFA 4H+15M)**.\n"
+               f"أنا **بوت التداول الفوري (Binance - استراتيجية 30 دقيقة)**.\n"
                f"<i>صنع بواسطه المطور عبدالرحمن محمد</i>")
     await update.message.reply_html(message)
 
