@@ -6,4 +6,4 @@ tqdm
 numpy
 ccxt
 requests
-
+pandas-ta
