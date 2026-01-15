@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# bot.py - نسخة استراتيجية 30 دقيقة
+# bot.py - نسخة استراتيجية 1 ساعة (مؤشرات جديدة)
 # -----------------------------------------------------------------------------
 
 import os
@@ -20,33 +20,40 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Falcon Bot Service (Binance - 30M Strategy) is Running!", 200
+    return "Falcon Bot Service (Binance - 1H Strategy) is Running!", 200
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
 # --- 2. إعدادات الاستراتيجية ---
-RSI_PERIOD = 14
-RSI_OVERSOLD = 35
+RSI_PERIOD = 6
+RSI_OVERSOLD = 40
 RSI_OVERBOUGHT = 70
 SCAN_INTERVAL_SECONDS = 15 * 60 # فحص كل 15 دقيقة
 bought_coins = []
 
 # --- دوال التحليل ---
 def calculate_indicators(df):
-    # RSI
+    # RSI(6)
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).ewm(alpha=1/RSI_PERIOD, adjust=False).mean()
     loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/RSI_PERIOD, adjust=False).mean()
     rs = gain / loss.replace(0, 1e-10)
     df['RSI'] = 100 - (100 / (1 + rs))
-    # MACD
-    ema12 = df['close'].ewm(span=12, adjust=False).mean()
-    ema26 = df['close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = ema12 - ema26
-    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    # MA20 (للهدف المتوقع)
-    df['MA20'] = df['close'].rolling(window=20).mean()
+
+    # EMA7 / EMA25 / EMA99
+    df['EMA7'] = df['close'].ewm(span=7, adjust=False).mean()
+    df['EMA25'] = df['close'].ewm(span=25, adjust=False).mean()
+    df['EMA99'] = df['close'].ewm(span=99, adjust=False).mean()
+
+    # Stochastic RSI
+    min_close = df['close'].rolling(window=14).min()
+    max_close = df['close'].rolling(window=14).max()
+    df['StochRSI'] = (df['RSI'] - min_close) / (max_close - min_close + 1e-10) * 100
+
+    # متوسط حجم التداول (Volume MA20)
+    df['VolMA20'] = df['volume'].rolling(window=20).mean()
+
     return df
 
 def get_top_usdt_pairs(client, limit=150):
@@ -60,32 +67,33 @@ def get_top_usdt_pairs(client, limit=150):
 
 def analyze_symbol(client, symbol):
     try:
-        # --- تم التعديل هنا: الاعتماد فقط على إطار 30 دقيقة ---
-        klines_30m = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_30MINUTE, limit=100)
-        if len(klines_30m) < 50: return 'HOLD', None, None
+        # --- استخدام إطار 1 ساعة ---
+        klines_1h = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1HOUR, limit=100)
+        if len(klines_1h) < 50: return 'HOLD', None, None
 
-        df_30m = pd.DataFrame(klines_30m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
-        df_30m[['close', 'open']] = df_30m[['close', 'open']].apply(pd.to_numeric)
+        df_1h = pd.DataFrame(klines_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
+        df_1h[['close', 'open', 'volume']] = df_1h[['close', 'open', 'volume']].apply(pd.to_numeric)
 
-        df_30m = calculate_indicators(df_30m)
+        df_1h = calculate_indicators(df_1h)
 
-        last_30m = df_30m.iloc[-1]
-        prev_30m = df_30m.iloc[-2]
-        current_price = last_30m['close']
-        expected_target = last_30m['MA20']
+        last_1h = df_1h.iloc[-1]
+        prev_1h = df_1h.iloc[-2]
+        current_price = last_1h['close']
 
         # شروط الشراء
-        rsi_is_oversold = last_30m['RSI'] < RSI_OVERSOLD
-        is_bullish_engulfing = (last_30m['close'] > last_30m['open'] and prev_30m['close'] < prev_30m['open'] and last_30m['close'] > prev_30m['open'] and last_30m['open'] < prev_30m['close'])
-        macd_is_bullish = last_30m['MACD'] > last_30m['MACD_Signal']
+        ema_trend_up = last_1h['EMA7'] > last_1h['EMA25'] > last_1h['EMA99']
+        rsi_condition = last_1h['RSI'] > 60
+        stoch_condition = last_1h['StochRSI'] > 60
+        volume_condition = last_1h['volume'] > last_1h['VolMA20']
 
-        if rsi_is_oversold and is_bullish_engulfing and macd_is_bullish:
-            return 'BUY', current_price, expected_target
+        buy_signals = sum([ema_trend_up, rsi_condition, stoch_condition, volume_condition])
+        if buy_signals >= 3:
+            return 'BUY', current_price, None
 
         # شروط البيع
-        rsi_is_overbought = last_30m['RSI'] > RSI_OVERBOUGHT
-        macd_is_bearish = last_30m['MACD'] < last_30m['MACD_Signal']
-        if rsi_is_overbought and macd_is_bearish:
+        rsi_overbought = last_1h['RSI'] > RSI_OVERBOUGHT
+        stoch_overbought = last_1h['StochRSI'] > 80
+        if rsi_overbought and stoch_overbought:
             return 'SELL', current_price, None
 
     except Exception as e:
@@ -96,14 +104,14 @@ def analyze_symbol(client, symbol):
 # --- مهمة الفحص الدوري ---
 async def scan_market(context):
     global bought_coins
-    logger.info("--- [Binance] بدء جولة فحص السوق (استراتيجية 30 دقيقة) ---")
+    logger.info("--- [Binance] بدء جولة فحص السوق (استراتيجية 1 ساعة) ---")
     client = context.job.data['binance_client']
     chat_id = context.job.data['chat_id']
 
     for symbol in list(bought_coins):
         status, price, _ = analyze_symbol(client, symbol)
         if status == 'SELL':
-            message = (f"💰 **[Binance] إشارة بيع (30M Strategy)** 💰\n\n"
+            message = (f"💰 **[Binance] إشارة بيع (1H Strategy)** 💰\n\n"
                        f"• **العملة:** `{symbol}`\n"
                        f"• **السعر الحالي:** `{price}`")
             await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
@@ -113,19 +121,11 @@ async def scan_market(context):
     symbols_to_scan = get_top_usdt_pairs(client, limit=150)
     for symbol in symbols_to_scan:
         if symbol in bought_coins: continue
-        status, current_price, target = analyze_symbol(client, symbol)
+        status, current_price, _ = analyze_symbol(client, symbol)
         if status == 'BUY':
-            if current_price > 0 and target > current_price:
-                profit_percentage = ((target / current_price) - 1) * 100
-                profit_text = f"• **الربح المتوقع:** `~{profit_percentage:.2f}%`\n"
-            else:
-                profit_text = ""
-
-            message = (f"🚨 **[Binance] إشارة شراء (30M Strategy)** 🚨\n\n"
+            message = (f"🚨 **[Binance] إشارة شراء (1H Strategy)** 🚨\n\n"
                        f"• **العملة:** `{symbol}`\n"
-                       f"• **السعر الحالي:** `{current_price}`\n"
-                       f"• **الهدف المتوقع:** `{target:.4f}`\n"
-                       f"{profit_text}")
+                       f"• **السعر الحالي:** `{current_price}`\n")
             await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
             bought_coins.append(symbol)
         await asyncio.sleep(1)
@@ -136,7 +136,7 @@ async def scan_market(context):
 async def start(update, context):
     user = update.effective_user
     message = (f"أهلاً بك يا {user.mention_html()}!\n\n"
-               f"أنا **بوت التداول الفوري (Binance - استراتيجية 30 دقيقة)**.\n"
+               f"أنا **بوت التداول الفوري (Binance - استراتيجية 1 ساعة)**.\n"
                f"<i>صنع بواسطه المطور عبدالرحمن محمد</i>")
     await update.message.reply_html(message)
 
@@ -170,4 +170,3 @@ if __name__ == "__main__":
     server_thread.start()
     logger.info("--- [Binance] Web Server has been started. ---")
     run_bot()
-
