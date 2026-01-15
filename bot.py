@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# bot.py - نسخة استراتيجية 1 ساعة (مؤشرات جديدة)
+# bot.py - نسخة استراتيجية 1 ساعة (v5.1 - إصلاح تنسيق الرسائل)
 # -----------------------------------------------------------------------------
 
 import os
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Falcon Bot Service (Binance - 1H Strategy) is Running!", 200
+    return "Falcon Bot Service (Binance - 1H Strategy v5.1) is Running!", 200
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
@@ -47,14 +47,14 @@ def calculate_indicators(df):
     df['EMA99'] = df['close'].ewm(span=99, adjust=False).mean()
 
     # Stochastic RSI
-    min_close = df['close'].rolling(window=14).min()
-    max_close = df['close'].rolling(window=14).max()
-    df['StochRSI'] = (df['RSI'] - min_close) / (max_close - min_close + 1e-10) * 100
+    min_rsi = df['RSI'].rolling(window=14).min()
+    max_rsi = df['RSI'].rolling(window=14).max()
+    df['StochRSI'] = (df['RSI'] - min_rsi) / (max_rsi - min_rsi + 1e-10) * 100
 
     # متوسط حجم التداول (Volume MA20)
     df['VolMA20'] = df['volume'].rolling(window=20).mean()
 
-    return df
+    return df.dropna()
 
 def get_top_usdt_pairs(client, limit=150):
     try:
@@ -75,9 +75,10 @@ def analyze_symbol(client, symbol):
         df_1h[['close', 'open', 'volume']] = df_1h[['close', 'open', 'volume']].apply(pd.to_numeric)
 
         df_1h = calculate_indicators(df_1h)
+        if df_1h.empty:
+            return 'HOLD', None, None
 
         last_1h = df_1h.iloc[-1]
-        prev_1h = df_1h.iloc[-2]
         current_price = last_1h['close']
 
         # شروط الشراء
@@ -111,10 +112,11 @@ async def scan_market(context):
     for symbol in list(bought_coins):
         status, price, _ = analyze_symbol(client, symbol)
         if status == 'SELL':
-            message = (f"💰 **[Binance] إشارة بيع (1H Strategy)** 💰\n\n"
-                       f"• **العملة:** `{symbol}`\n"
-                       f"• **السعر الحالي:** `{price}`")
-            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
+            # --- تم التعديل هنا ---
+            message = (f"💰 *[Binance] إشارة بيع 1H Strategy*\n\n"
+                       f"• *العملة:* `{symbol}`\n"
+                       f"• *السعر الحالي:* `{price}`")
+            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
             bought_coins.remove(symbol)
         await asyncio.sleep(1)
 
@@ -123,10 +125,11 @@ async def scan_market(context):
         if symbol in bought_coins: continue
         status, current_price, _ = analyze_symbol(client, symbol)
         if status == 'BUY':
-            message = (f"🚨 **[Binance] إشارة شراء (1H Strategy)** 🚨\n\n"
-                       f"• **العملة:** `{symbol}`\n"
-                       f"• **السعر الحالي:** `{current_price}`\n")
-            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
+            # --- تم التعديل هنا ---
+            message = (f"🚨 *[Binance] إشارة شراء 1H Strategy*\n\n"
+                       f"• *العملة:* `{symbol}`\n"
+                       f"• *السعر الحالي:* `{current_price}`")
+            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
             bought_coins.append(symbol)
         await asyncio.sleep(1)
 
@@ -170,3 +173,4 @@ if __name__ == "__main__":
     server_thread.start()
     logger.info("--- [Binance] Web Server has been started. ---")
     run_bot()
+
