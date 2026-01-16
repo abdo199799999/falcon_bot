@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# bot.py - نسخة v6.0 (Bottom Sniper - قناص القيعان)
+# bot.py - نسخة v6.1 (Patient Bottom Sniper - قناص القيعان الصبور)
 # -----------------------------------------------------------------------------
 
 import os
@@ -20,21 +20,20 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Falcon Bot Service (Binance - Bottom Sniper v6.0) is Running!", 200
+    return "Falcon Bot Service (Binance - Patient Bottom Sniper v6.1) is Running!", 200
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
 # --- 2. إعدادات الاستراتيجية ---
 RSI_PERIOD = 14
-RSI_OVERSOLD = 30  # سنبحث عن التشبع البيعي الشديد
+RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
-SCAN_INTERVAL_SECONDS = 15 * 60 # فحص كل 15 دقيقة
+SCAN_INTERVAL_SECONDS = 15 * 60
 bought_coins = []
 
 # --- دوال التحليل ---
 def calculate_indicators(df):
-    # RSI
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).ewm(alpha=1/RSI_PERIOD, adjust=False).mean()
     loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/RSI_PERIOD, adjust=False).mean()
@@ -53,7 +52,6 @@ def get_top_usdt_pairs(client, limit=150):
 
 def analyze_symbol(client, symbol):
     try:
-        # --- استخدام إطار 1 ساعة للبحث عن الانعكاسات ---
         klines_1h = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1HOUR, limit=100)
         if len(klines_1h) < 50: return 'HOLD', None
 
@@ -61,28 +59,31 @@ def analyze_symbol(client, symbol):
         df_1h[['close', 'open']] = df_1h[['close', 'open']].apply(pd.to_numeric)
 
         df_1h = calculate_indicators(df_1h)
-        if df_1h.empty:
+        if df_1h.empty or len(df_1h) < 3:
             return 'HOLD', None
 
-        last = df_1h.iloc[-1]
-        prev = df_1h.iloc[-2]
+        # --- شروط قنص القاع الجديدة مع التأكيد ---
+        last = df_1h.iloc[-1]        # الشمعة الحالية (شمعة التأكيد المحتملة)
+        prev = df_1h.iloc[-2]        # الشمعة السابقة (شمعة الابتلاع المحتملة)
+        prev_prev = df_1h.iloc[-3]   # الشمعة التي قبلها (شمعة الهبوط)
         current_price = last['close']
 
-        # --- شروط قنص القاع الجديدة ---
-        # 1. الشمعة السابقة كانت حمراء (هبوط)
-        prev_is_bearish = prev['close'] < prev['open']
-        # 2. الشمعة الحالية خضراء (بداية صعود)
-        last_is_bullish = last['close'] > last['open']
-        # 3. الشمعة الحالية ابتلعت الشمعة السابقة (إشارة ابتلاع صعودي قوية)
-        is_bullish_engulfing = last_is_bullish and prev_is_bearish and last['close'] > prev['open'] and last['open'] < prev['close']
-        # 4. مؤشر القوة النسبية للشمعة السابقة كان في منطقة تشبع بيعي
-        prev_rsi_oversold = prev['RSI'] < RSI_OVERSOLD
+        # 1. الشمعة التي قبل السابقة كانت حمراء
+        prev_prev_is_bearish = prev_prev['close'] < prev_prev['open']
+        # 2. الشمعة السابقة كانت خضراء (ابتلاع)
+        prev_is_bullish = prev['close'] > prev['open']
+        # 3. الشمعة السابقة ابتلعت الشمعة التي قبلها
+        is_bullish_engulfing = prev_is_bullish and prev_prev_is_bearish and prev['close'] > prev_prev['open'] and prev['open'] < prev_prev['close']
+        # 4. مؤشر RSI كان في منطقة تشبع بيعي عند شمعة الهبوط
+        prev_prev_rsi_oversold = prev_prev['RSI'] < RSI_OVERSOLD
+        # 5. الشمعة الحالية (الأخيرة) هي شمعة خضراء (التأكيد)
+        confirmation_candle = last['close'] > last['open']
 
-        # الشرط النهائي: إذا حدث ابتلاع صعودي بعد تشبع بيعي
-        if is_bullish_engulfing and prev_rsi_oversold:
+        # الشرط النهائي: إذا حدث ابتلاع بعد تشبع، وجاءت بعده شمعة تأكيد خضراء
+        if is_bullish_engulfing and prev_prev_rsi_oversold and confirmation_candle:
             return 'BUY', current_price
 
-        # شروط البيع (يمكن أن تبقى كما هي أو نطورها لاحقًا)
+        # شروط البيع
         rsi_overbought = last['RSI'] > RSI_OVERBOUGHT
         if rsi_overbought:
             return 'SELL', current_price
@@ -92,13 +93,12 @@ def analyze_symbol(client, symbol):
 
     return 'HOLD', None
 
-# --- مهمة الفحص الدوري (تم تبسيط الرسائل) ---
+# --- بقية الكود تبقى كما هي تمامًا ---
 async def scan_market(context):
     global bought_coins
-    logger.info("--- [Binance] بدء جولة فحص (قناص القيعان v6.0) ---")
+    logger.info("--- [Binance] بدء جولة فحص (قناص صبور v6.1) ---")
     client = context.job.data['binance_client']
     chat_id = context.job.data['chat_id']
-
     for symbol in list(bought_coins):
         status, price = analyze_symbol(client, symbol)
         if status == 'SELL':
@@ -106,24 +106,21 @@ async def scan_market(context):
             await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
             bought_coins.remove(symbol)
         await asyncio.sleep(1)
-
     symbols_to_scan = get_top_usdt_pairs(client, limit=150)
     for symbol in symbols_to_scan:
         if symbol in bought_coins: continue
         status, current_price = analyze_symbol(client, symbol)
         if status == 'BUY':
-            message = f"🎯 *[Bottom Sniper] تم رصد قاع محتمل!*\n\n• *العملة:* `{symbol}`\n• *السعر الحالي:* `{current_price}`"
+            message = f"🎯 *[Patient Sniper] تم رصد قاع مؤكد!*\n\n• *العملة:* `{symbol}`\n• *السعر الحالي:* `{current_price}`"
             await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
             bought_coins.append(symbol)
         await asyncio.sleep(1)
-
     logger.info(f"--- [Binance] انتهاء جولة الفحص. ---")
 
-# --- بقية الكود (start, run_bot, etc.) تبقى كما هي تمامًا ---
 async def start(update, context):
     user = update.effective_user
     message = (f"أهلاً بك يا {user.mention_html()}!\n\n"
-               f"أنا **بوت قناص القيعان (v6.0)**.\n"
+               f"أنا **بوت قناص القيعان الصبور (v6.1)**.\n"
                f"<i>صنع بواسطه المطور عبدالرحمن محمد</i>")
     await update.message.reply_html(message)
 
