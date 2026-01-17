@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# bot_v7.py - نسخة v7.0 (Hybrid Sniper + News Watcher)
+# bot.py - نسخة v7.1 (Hybrid Sniper + News Watcher)
 # -----------------------------------------------------------------------------
 
 import os
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Falcon Bot Service (Binance - Hybrid Sniper v7.0) is Running!", 200
+    return "Falcon Bot Service (Binance - Hybrid Sniper v7.1) is Running!", 200
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
@@ -103,12 +103,16 @@ def analyze_symbol(client, symbol):
 # --- دوال الأخبار ---
 def check_coinmarketcal():
     url = "https://api.coinmarketcal.com/v1/events"
-    headers = {"Accept": "application/json"}
-    params = {"sortBy": "date"}
+    # يجب الحصول على مفتاح API من CoinMarketCal وإضافته كمتغير بيئة
+    api_key = os.getenv("COINMARKETCAL_API_KEY")
+    if not api_key:
+        return []
+    headers = {"Accept": "application/json", "x-api-key": api_key}
+    params = {"sortBy": "created_desc", "max": 5} # أحدث 5 أحداث
     try:
-        response = requests.get(url, headers=params)
+        response = requests.get(url, headers=headers, params=params)
         if response.status_code == 200:
-            return response.json()[:5]
+            return response.json().get("body", [])
     except Exception as e:
         logger.error(f"[News] خطأ CoinMarketCal: {e}")
     return []
@@ -126,7 +130,7 @@ def check_binance_announcements():
 # --- فحص السوق ---
 async def scan_market(context):
     global bought_coins
-    logger.info("--- [Binance] بدء جولة فحص (Hybrid Sniper v7.0) ---")
+    logger.info("--- [Binance] بدء جولة فحص (Hybrid Sniper v7.1) ---")
     client = context.job.data['binance_client']
     chat_id = context.job.data['chat_id']
 
@@ -167,7 +171,7 @@ async def scan_market(context):
 async def start(update, context):
     user = update.effective_user
     message = (f"أهلاً بك يا {user.mention_html()}!\n\n"
-               f"أنا **بوت Hybrid Sniper v7.0**.\n"
+               f"أنا **بوت Hybrid Sniper v7.1**.\n"
                f"<i>صنع بواسطه المطور عبدالرحمن محمد</i>")
     await update.message.reply_html(message)
 
@@ -189,3 +193,19 @@ def run_bot():
     job_data = {'binance_client': binance_client, 'chat_id': TELEGRAM_CHAT_ID}
     job_queue = application.job_queue
     job_queue.run_repeating(scan_market, interval=SCAN_INTERVAL_SECONDS, first=10, data=job_data)
+    logger.info("--- [Binance] البوت جاهز ويعمل. ---")
+    application.run_polling()
+
+# --- نقطة البداية الرئيسية (تم الإصلاح هنا) ---
+if __name__ == "__main__":
+    logger.info("--- [Hybrid Sniper] Starting Main Application ---")
+    
+    # الخطوة 1: تشغيل خادم الويب في الخلفية
+    server_thread = Thread(target=run_server)
+    server_thread.daemon = True
+    server_thread.start()
+    logger.info("--- [Hybrid Sniper] Web Server has been started. ---")
+    
+    # الخطوة 2: تشغيل بوت التليجرام الرئيسي
+    run_bot()
+
